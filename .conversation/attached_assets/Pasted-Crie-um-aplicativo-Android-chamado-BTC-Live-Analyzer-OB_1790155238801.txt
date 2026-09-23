@@ -1,0 +1,87 @@
+Crie um aplicativo Android chamado BTC Live Analyzer.
+
+OBJETIVO:
+O aplicativo deve analisar em tempo real o gráfico do Bitcoin (BTC) que está sendo exibido na tela do celular do usuário.
+
+FUNCIONAMENTO PRINCIPAL:
+
+1. O usuário abre o aplicativo.
+2. O aplicativo solicita a permissão oficial do Android para captura de tela (MediaProjection).
+3. Após a autorização, o aplicativo inicia um serviço em segundo plano (Foreground Service).
+4. O serviço captura a tela continuamente, sem salvar uma gravação de vídeo.
+5. O sistema deve analisar somente a região do gráfico definida pelo usuário.
+6. O aplicativo deve manter um histórico temporário de pelo menos 5 minutos das informações extraídas do gráfico.
+7. A cada novo período de análise, o sistema deve atualizar esse histórico e analisar os movimentos recentes.
+8. O sistema deve identificar movimentos de alta, movimentos de baixa e possíveis padrões técnicos configurados no algoritmo.
+9. Quando houver condições suficientes para um sinal, mostrar:
+   - COMPRA
+   - VENDA
+   - AGUARDAR
+10. O aplicativo deve emitir uma notificação quando um novo sinal for gerado.
+11. O aplicativo NÃO deve realizar compras ou vendas automaticamente. Nesta primeira versão, ele apenas gera sinais.
+
+INTERFACE:
+Criar uma interface simples contendo:
+
+- Status da captura: ATIVA / INATIVA
+- Status da análise: ANALISANDO / AGUARDANDO DADOS
+- Tempo de histórico acumulado
+- Mercado: BTC
+- Último sinal
+- Horário do último sinal
+- Botão INICIAR ANÁLISE
+- Botão PARAR ANÁLISE
+- Configuração para selecionar a área da tela onde está o gráfico
+
+ANÁLISE:
+A primeira versão deve utilizar regras objetivas e simples, sem depender de uma IA externa.
+
+O sistema deve:
+
+- detectar mudanças de posição do gráfico;
+- identificar movimentos ascendentes e descendentes;
+- calcular tendências de curto prazo;
+- detectar sequências de altas e baixas;
+- armazenar temporariamente os dados necessários para a análise;
+- permitir que novas regras de padrões sejam adicionadas posteriormente.
+
+IMPORTANTE:
+Não afirmar que um sinal garante que o Bitcoin irá subir ou cair.
+Os sinais devem ser apresentados como resultado da análise técnica do aplicativo.
+
+REQUISITOS ANDROID:
+
+- Utilizar MediaProjection para captura de tela.
+- Utilizar Foreground Service para manter a análise funcionando em segundo plano.
+- Solicitar todas as permissões necessárias ao usuário de maneira clara.
+- Não utilizar métodos ocultos ou que tentem burlar as proteções do Android.
+- Não armazenar gravações da tela.
+- Processar os frames temporariamente e descartá-los depois da análise.
+- Economizar bateria e processamento sempre que possível.
+
+ARQUITETURA:
+Separar o projeto em módulos:
+
+1. Interface do usuário.
+2. Serviço de captura de tela.
+3. Processador/analisador do gráfico.
+4. Motor de regras e padrões.
+5. Gerenciador de sinais.
+6. Sistema de notificações.
+7. Histórico temporário da análise.
+
+O código deve ser organizado, comentado e preparado para futuras melhorias.
+
+PRIMEIRA META:
+Criar uma versão funcional mínima que consiga:
+
+1. solicitar a captura de tela;
+2. iniciar o serviço em segundo plano;
+3. capturar a tela ao vivo;
+4. selecionar a região do gráfico;
+5. manter 5 minutos de dados temporários;
+6. analisar os movimentos;
+7. mostrar COMPRA, VENDA ou AGUARDAR;
+8. enviar uma notificação.
+
+Não implementar integração para executar ordens na corretora nesta primeira versão.

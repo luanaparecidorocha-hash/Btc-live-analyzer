@@ -1,0 +1,24 @@
+kind = "mobile"
+previewPath = "/btc-live-analyzer/"
+title = "BTC Live Analyzer"
+description = "Aplicativo Android que captura temporariamente a tela autorizada pelo usuário, analisa a região do gráfico do Bitcoin com regras técnicas locais e apresenta sinais de compra, venda ou aguardar sem executar ordens."
+version = "1.0.0"
+id = "artifacts/btc-live-analyzer"
+router = "expo-domain"
+
+[[services]]
+name = "expo"
+ensurePreviewReachable = "/status"
+paths = [ "/btc-live-analyzer/" ]
+localPort = 25712
+
+[services.development]
+run = "pnpm --filter @workspace/btc-live-analyzer run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/btc-live-analyzer", "run", "build" ]
+run = [ "pnpm", "--filter", "@workspace/btc-live-analyzer", "run", "serve" ]
+
+[services.env]
+PORT = "25712"
+BASE_PATH = "/btc-live-analyzer/"

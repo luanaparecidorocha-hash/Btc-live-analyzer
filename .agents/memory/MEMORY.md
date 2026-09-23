@@ -1,0 +1,1 @@
+- [Android capture boundary](android-capture-boundary.md) — MediaProjection and a foreground service require a native Android build; Expo Go cannot provide a truthful screen-capture implementation.
