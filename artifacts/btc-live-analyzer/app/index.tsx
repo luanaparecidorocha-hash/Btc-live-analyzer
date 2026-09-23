@@ -15,8 +15,8 @@ import { AnalyzerProvider, useAnalyzer } from '@/context/AnalyzerContext';
 import type { CaptureRegion } from '@/lib/screenCapture';
 
 const signalColor = {
-  COMPRA: '#55d6a6',
-  VENDA: '#ee6f5c',
+  'POSSÍVEL COMPRA': '#55d6a6',
+  'POSSÍVEL VENDA': '#ee6f5c',
   AGUARDAR: '#f3b63f',
 } as const;
 
@@ -32,7 +32,7 @@ function StatusPill({ label, active, tone }: { label: string; active: boolean; t
   );
 }
 
-function SignalBadge({ signal }: { signal: 'COMPRA' | 'VENDA' | 'AGUARDAR' }) {
+function SignalBadge({ signal }: { signal: 'POSSÍVEL COMPRA' | 'POSSÍVEL VENDA' | 'AGUARDAR' }) {
   const colors = useColors();
   return (
     <View style={[styles.signalBadge, { backgroundColor: `${signalColor[signal]}18`, borderColor: `${signalColor[signal]}66` }]}>
@@ -123,7 +123,7 @@ function AnalyzerScreen() {
         </View>
 
         <View style={styles.statusRow}>
-          <StatusPill label={`CAPTURA ${analyzer.captureStatus}`} active={analyzer.isRunning} tone="green" />
+          <StatusPill label={`CAPTURA ${analyzer.captureStatus}`} active={analyzer.captureStatus === 'ATIVA'} tone="green" />
           <StatusPill label={analyzer.analysisStatus} active={analyzer.isRunning} tone="blue" />
         </View>
 

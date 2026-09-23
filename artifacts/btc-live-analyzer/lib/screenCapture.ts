@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import { requireOptionalNativeModule } from 'expo';
 
 export type CaptureRegion = {
   left: number;
@@ -7,34 +8,75 @@ export type CaptureRegion = {
   height: number;
 };
 
+export type CaptureStatus = 'DESATIVADA' | 'SOLICITANDO PERMISSÃO' | 'ATIVA' | 'ERRO';
+
 export type CapturePermissionResult = {
   granted: boolean;
   supported: boolean;
+  status: CaptureStatus;
   message?: string;
 };
 
-/**
- * This is the explicit boundary for the Android MediaProjection bridge.
- * Expo Go cannot register a custom Android Foreground Service or MediaProjection
- * module, so this build never fakes a capture. A native Android build can
- * replace this implementation without changing the analyzer or UI contracts.
- */
+export type NativeCaptureFrame = {
+  timestamp: number;
+  position: number;
+  meanLuma: number;
+  candidatePixels: number;
+};
+
+type NativeCaptureModule = {
+  requestPermission: () => Promise<CapturePermissionResult>;
+  start: (region: CaptureRegion) => Promise<void>;
+  stop: () => Promise<void>;
+  addListener: (eventName: 'onCaptureStateChanged' | 'onFrame', listener: (payload: Record<string, unknown>) => void) => { remove: () => void };
+};
+
+const nativeCapture = Platform.OS === 'android'
+  ? requireOptionalNativeModule<NativeCaptureModule>('BtcScreenCapture')
+  : null;
+
+export function isNativeCaptureAvailable(): boolean {
+  return nativeCapture !== null;
+}
+
 export async function requestScreenCapturePermission(): Promise<CapturePermissionResult> {
-  if (Platform.OS !== 'android') {
+  if (!nativeCapture) {
     return {
       granted: false,
       supported: false,
-      message: 'A captura de tela está disponível apenas no Android.',
+      status: 'ERRO',
+      message: 'O módulo MediaProjection não está disponível nesta plataforma ou build.',
     };
   }
 
-  return {
-    granted: false,
-    supported: false,
-    message: 'A captura MediaProjection precisa de uma build Android nativa para solicitar a autorização oficial do sistema.',
-  };
+  return nativeCapture.requestPermission();
+}
+
+export async function startScreenCapture(region: CaptureRegion): Promise<void> {
+  if (!nativeCapture) throw new Error('O módulo MediaProjection não está disponível nesta build.');
+  await nativeCapture.start(region);
 }
 
 export async function stopScreenCapture(): Promise<void> {
-  return Promise.resolve();
+  if (!nativeCapture) return;
+  await nativeCapture.stop();
+}
+
+export function subscribeCaptureState(listener: (status: CaptureStatus, message?: string) => void): { remove: () => void } {
+  if (!nativeCapture) return { remove: () => undefined };
+  return nativeCapture.addListener('onCaptureStateChanged', (payload: Record<string, unknown>) => {
+    listener(payload.status as CaptureStatus, payload.message as string | undefined);
+  });
+}
+
+export function subscribeCaptureFrames(listener: (frame: NativeCaptureFrame) => void): { remove: () => void } {
+  if (!nativeCapture) return { remove: () => undefined };
+  return nativeCapture.addListener('onFrame', (payload: Record<string, unknown>) => {
+    listener({
+      timestamp: Number(payload.timestamp),
+      position: Number(payload.position),
+      meanLuma: Number(payload.meanLuma),
+      candidatePixels: Number(payload.candidatePixels),
+    });
+  });
 }

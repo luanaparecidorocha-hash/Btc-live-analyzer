@@ -11,6 +11,7 @@
       "supportsTablet": false
     },
     "android": {
+      "package": "com.btcliveanalyzer.app",
       "permissions": [
         "POST_NOTIFICATIONS",
         "FOREGROUND_SERVICE",

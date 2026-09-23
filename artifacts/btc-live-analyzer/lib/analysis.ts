@@ -1,4 +1,4 @@
-export type Signal = 'COMPRA' | 'VENDA' | 'AGUARDAR';
+export type Signal = 'POSSÍVEL COMPRA' | 'POSSÍVEL VENDA' | 'AGUARDAR';
 
 export type ChartPoint = {
   timestamp: number;
@@ -15,16 +15,18 @@ export type AnalysisResult = {
 };
 
 const MIN_POINTS_FOR_SIGNAL = 4;
+export const DEFAULT_ANALYSIS_WINDOW_MS = 5 * 60 * 1000;
 
-export function analyzeChart(points: ChartPoint[]): AnalysisResult {
-  if (points.length < MIN_POINTS_FOR_SIGNAL) {
+export function analyzeChart(points: ChartPoint[], windowMs = DEFAULT_ANALYSIS_WINDOW_MS): AnalysisResult {
+  const elapsed = points.length > 1 ? points[points.length - 1].timestamp - points[0].timestamp : 0;
+  if (points.length < MIN_POINTS_FOR_SIGNAL || elapsed < windowMs) {
     return {
       signal: 'AGUARDAR',
       trend: 'LATERAL',
       confidence: 0,
       streak: 0,
       slope: 0,
-      reason: 'Aguardando dados suficientes para analisar o movimento.',
+      reason: `Aguardando uma janela mínima de ${Math.ceil(windowMs / 60000)} minutos de dados reais.`,
     };
   }
 
@@ -48,7 +50,7 @@ export function analyzeChart(points: ChartPoint[]): AnalysisResult {
 
   if (direction > 0 && confidence >= 68 && streak >= 3) {
     return {
-      signal: 'COMPRA',
+      signal: 'POSSÍVEL COMPRA',
       trend,
       confidence,
       streak,
@@ -59,7 +61,7 @@ export function analyzeChart(points: ChartPoint[]): AnalysisResult {
 
   if (direction < 0 && confidence >= 68 && streak >= 3) {
     return {
-      signal: 'VENDA',
+      signal: 'POSSÍVEL VENDA',
       trend,
       confidence,
       streak,
