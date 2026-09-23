@@ -1,1 +1,2 @@
 - [Android capture boundary](android-capture-boundary.md) — MediaProjection and a foreground service require a native Android build; Expo Go cannot provide a truthful screen-capture implementation.
+- [Android build validation](android-build-validation.md) — Native autolinking validates in this workspace, but APK compilation needs a persistent Android SDK and a stable JDK.

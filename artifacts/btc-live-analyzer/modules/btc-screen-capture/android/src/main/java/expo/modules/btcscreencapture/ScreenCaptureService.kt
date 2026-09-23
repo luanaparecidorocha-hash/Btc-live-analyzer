@@ -124,7 +124,7 @@ class ScreenCaptureService : Service() {
         null
       )
       started = true
-      currentState = mapOf("status" to "ATIVA")
+      currentState = mapOf<String, Any>("status" to "ATIVA")
       emitState("ATIVA", null)
     } catch (error: Exception) {
       emitState("ERRO", error.message ?: "Erro desconhecido ao iniciar a captura.")
