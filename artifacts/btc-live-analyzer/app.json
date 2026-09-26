@@ -18,6 +18,11 @@
         "FOREGROUND_SERVICE_MEDIA_PROJECTION"
       ]
     },
+    "extra": {
+      "eas": {
+        "projectId": "ec5907a8-5def-40a7-bf1a-532bd17345fe"
+      }
+    },
     "web": {
       "favicon": "./assets/images/icon.png"
     },
