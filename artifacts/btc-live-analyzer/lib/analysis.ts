@@ -33,7 +33,10 @@ export function analyzeChart(points: ChartPoint[], windowMs = DEFAULT_ANALYSIS_W
   const recent = points.slice(-12);
   const deltas = recent.slice(1).map((point, index) => point.position - recent[index].position);
   const slope = deltas.reduce((sum, delta) => sum + delta, 0) / deltas.length;
-  const threshold = 0.7;
+  // Positions are normalized to 0..1 and recent points are sampled at a
+  // stable cadence by AnalyzerContext. A threshold of 0.7 would require an
+  // impossible 70% move between every sampled point.
+  const threshold = 0.012;
   const direction = slope > threshold ? 1 : slope < -threshold ? -1 : 0;
   let streak = 0;
 
@@ -43,7 +46,7 @@ export function analyzeChart(points: ChartPoint[], windowMs = DEFAULT_ANALYSIS_W
     if (direction !== 0) streak += 1;
   }
 
-  const movementStrength = Math.min(1, Math.abs(slope) / 4);
+  const movementStrength = Math.min(1, Math.abs(slope) / 0.08);
   const consistency = deltas.filter((delta) => (delta > 0 ? 1 : delta < 0 ? -1 : 0) === direction).length / deltas.length;
   const confidence = Math.round((movementStrength * 0.55 + consistency * 0.45) * 100);
   const trend = direction > 0 ? 'ALTA' : direction < 0 ? 'BAIXA' : 'LATERAL';

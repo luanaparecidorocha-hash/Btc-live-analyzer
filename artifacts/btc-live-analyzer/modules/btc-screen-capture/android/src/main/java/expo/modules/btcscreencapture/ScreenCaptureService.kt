@@ -19,11 +19,9 @@ import android.util.DisplayMetrics
 import android.view.Display
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
-import androidx.core.content.ContextCompat
 import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -33,6 +31,7 @@ class ScreenCaptureService : Service() {
   private var imageReader: ImageReader? = null
   private var executor: ExecutorService? = null
   private var started = false
+  private var cleaningUp = false
 
   override fun onCreate() {
     super.onCreate()
@@ -107,8 +106,9 @@ class ScreenCaptureService : Service() {
 
       projection?.registerCallback(object : MediaProjection.Callback() {
         override fun onStop() {
-          emitState("DESATIVADA", "A sessão de captura foi encerrada pelo Android.")
+          if (cleaningUp) return
           cleanupProjection()
+          emitState("DESATIVADA", "A sessão de captura foi encerrada pelo Android.")
           stopSelf()
         }
       }, null)
@@ -224,13 +224,19 @@ class ScreenCaptureService : Service() {
   }
 
   private fun cleanupProjection() {
-    started = false
-    virtualDisplay?.release()
-    virtualDisplay = null
-    imageReader?.close()
-    imageReader = null
-    projection?.stop()
-    projection = null
+    cleaningUp = true
+    try {
+      started = false
+      virtualDisplay?.release()
+      virtualDisplay = null
+      imageReader?.close()
+      imageReader = null
+      val activeProjection = projection
+      projection = null
+      activeProjection?.stop()
+    } finally {
+      cleaningUp = false
+    }
   }
 
   override fun onTaskRemoved(rootIntent: Intent?) {
@@ -241,9 +247,13 @@ class ScreenCaptureService : Service() {
   }
 
   override fun onDestroy() {
+    val wasRunning = started
     cleanupProjection()
     executor?.shutdownNow()
     executor = null
+    if (wasRunning && currentState?.get("status") != "DESATIVADA") {
+      emitState("DESATIVADA", "A captura foi interrompida.")
+    }
     super.onDestroy()
   }
 

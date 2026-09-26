@@ -40,6 +40,7 @@ type AnalyzerContextValue = {
 const REGION_KEY = '@btc-live-analyzer/region';
 const SIGNAL_KEY = '@btc-live-analyzer/signal-history';
 const defaultRegion: CaptureRegion = { left: 8, top: 24, width: 84, height: 48 };
+const FRAME_SAMPLE_INTERVAL_MS = 15 * 1000;
 const AnalyzerContext = createContext<AnalyzerContextValue | null>(null);
 
 export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
@@ -67,7 +68,13 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
       if (status === 'ATIVA') setError(null);
     });
     const frameSubscription = subscribeCaptureFrames((frame) => {
-      setHistory((current) => trimHistory([...current, { timestamp: frame.timestamp, position: frame.position }], frame.timestamp));
+      setHistory((current) => {
+        const lastPoint = current[current.length - 1];
+        if (lastPoint && frame.timestamp - lastPoint.timestamp < FRAME_SAMPLE_INTERVAL_MS) {
+          return current;
+        }
+        return trimHistory([...current, { timestamp: frame.timestamp, position: frame.position }], frame.timestamp);
+      });
     });
     return () => {
       stateSubscription.remove();
@@ -87,14 +94,17 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
   const startAnalysis = async () => {
     setError(null);
     setCaptureStatus('SOLICITANDO PERMISSÃO');
-    const permission = await requestScreenCapturePermission();
-    if (!permission.granted) {
-      setCaptureStatus(permission.status);
-      setError(permission.message ?? 'A autorização de captura não foi concedida.');
-      return;
-    }
-    await prepareNotifications();
+    setHistory([]);
+    setLastSignal('AGUARDAR');
+    setLastSignalAt(null);
     try {
+      const permission = await requestScreenCapturePermission();
+      if (!permission.granted) {
+        setCaptureStatus(permission.status);
+        setError(permission.message ?? 'A autorização de captura não foi concedida.');
+        return;
+      }
+      await prepareNotifications();
       await startScreenCapture(region);
     } catch (captureError) {
       const message = captureError instanceof Error ? captureError.message : 'Não foi possível iniciar o serviço de captura.';
@@ -104,8 +114,17 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
   };
 
   const stopAnalysis = async () => {
-    await stopScreenCapture();
-    setCaptureStatus('DESATIVADA');
+    try {
+      await stopScreenCapture();
+      setHistory([]);
+      setLastSignal('AGUARDAR');
+      setLastSignalAt(null);
+      setCaptureStatus('DESATIVADA');
+    } catch (stopError) {
+      const message = stopError instanceof Error ? stopError.message : 'Não foi possível interromper a captura.';
+      setCaptureStatus('ERRO');
+      setError(message);
+    }
   };
 
   useEffect(() => {
