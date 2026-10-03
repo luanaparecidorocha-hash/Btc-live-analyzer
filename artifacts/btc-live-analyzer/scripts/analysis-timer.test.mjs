@@ -42,6 +42,46 @@ class VirtualClock {
   }
 }
 
+const SAMPLE_INTERVAL_MS = 5_000;
+const DEFAULT_PRICE = 80_000;
+
+function makeLinearPoints(totalChangePercent, count = 60) {
+  return Array.from({ length: count }, (_, index) => {
+    const timestamp = index * SAMPLE_INTERVAL_MS;
+    const progress = timestamp / DEFAULT_ANALYSIS_WINDOW_MS;
+    return {
+      timestamp,
+      price: DEFAULT_PRICE * (1 + (totalChangePercent * progress) / 100),
+    };
+  });
+}
+
+function makeSegmentedPoints(segmentChanges) {
+  const segmentDurationMs = DEFAULT_ANALYSIS_WINDOW_MS / segmentChanges.length;
+  const segmentStartPrices = [DEFAULT_PRICE];
+
+  for (const changePercent of segmentChanges) {
+    const nextPrice = segmentStartPrices[segmentStartPrices.length - 1]
+      * (1 + changePercent / 100);
+    segmentStartPrices.push(nextPrice);
+  }
+
+  return Array.from({ length: 60 }, (_, index) => {
+    const timestamp = index * SAMPLE_INTERVAL_MS;
+    const segmentIndex = Math.min(
+      segmentChanges.length - 1,
+      Math.floor(timestamp / segmentDurationMs),
+    );
+    const segmentStart = segmentIndex * segmentDurationMs;
+    const progress = (timestamp - segmentStart) / segmentDurationMs;
+    const segmentStartPrice = segmentStartPrices[segmentIndex];
+    const price = segmentStartPrice
+      * (1 + (segmentChanges[segmentIndex] * progress) / 100);
+
+    return { timestamp, price };
+  });
+}
+
 test('freezes and evaluates the five-minute window once at exactly 5:00', () => {
   const clock = new VirtualClock();
   const startedAt = clock.now();
@@ -77,4 +117,84 @@ test('freezes and evaluates the five-minute window once at exactly 5:00', () => 
   clock.advanceBy(DEFAULT_ANALYSIS_WINDOW_MS);
   assert.equal(completionCount, 1);
   assert.equal(clock.tasks.size, 0);
+});
+
+test('confirms a sufficiently strong, consistent upward move with a concise explanation', () => {
+  const result = analyzeChart(
+    makeLinearPoints(0.2),
+    DEFAULT_ANALYSIS_WINDOW_MS,
+    DEFAULT_ANALYSIS_WINDOW_MS,
+  );
+
+  assert.equal(result.signal, 'POSSÍVEL COMPRA');
+  assert.equal(result.trend, 'ALTA');
+  assert.ok(result.confidence >= 68);
+  assert.match(result.reason, /10\/10 períodos na direção/);
+  assert.match(result.reason, /não a chance de acerto/);
+});
+
+test('confirms a sufficiently strong, consistent downward move', () => {
+  const result = analyzeChart(
+    makeLinearPoints(-0.2),
+    DEFAULT_ANALYSIS_WINDOW_MS,
+    DEFAULT_ANALYSIS_WINDOW_MS,
+  );
+
+  assert.equal(result.signal, 'POSSÍVEL VENDA');
+  assert.equal(result.trend, 'BAIXA');
+  assert.ok(result.confidence >= 68);
+});
+
+test('waits when the net move is too small even if it is consistent', () => {
+  const result = analyzeChart(
+    makeLinearPoints(0.08),
+    DEFAULT_ANALYSIS_WINDOW_MS,
+    DEFAULT_ANALYSIS_WINDOW_MS,
+  );
+
+  assert.equal(result.signal, 'AGUARDAR');
+  assert.match(result.reason, /abaixo do mínimo de 0\.12%/);
+});
+
+test('waits when strong movement conflicts across the analysis window', () => {
+  const result = analyzeChart(
+    makeSegmentedPoints([0.07, -0.04, 0.07, -0.04, 0.07, -0.04, 0.07, -0.04, 0.07, -0.04]),
+    DEFAULT_ANALYSIS_WINDOW_MS,
+    DEFAULT_ANALYSIS_WINDOW_MS,
+  );
+
+  assert.equal(result.signal, 'AGUARDAR');
+  assert.match(result.reason, /tendência inconsistente/);
+  assert.match(result.reason, /5\/10 períodos na direção, 5\/10 contra/);
+});
+
+test('waits when a completed window has too few or stale samples', () => {
+  const sparsePoints = makeLinearPoints(0.3, 8);
+  const sparseResult = analyzeChart(
+    sparsePoints,
+    DEFAULT_ANALYSIS_WINDOW_MS,
+    DEFAULT_ANALYSIS_WINDOW_MS,
+  );
+  assert.equal(sparseResult.signal, 'AGUARDAR');
+  assert.match(sparseResult.reason, /apenas 8 amostras/);
+
+  const stalePoints = makeLinearPoints(0.3).slice(0, 40);
+  const staleResult = analyzeChart(
+    stalePoints,
+    DEFAULT_ANALYSIS_WINDOW_MS,
+    DEFAULT_ANALYSIS_WINDOW_MS,
+  );
+  assert.equal(staleResult.signal, 'AGUARDAR');
+  assert.match(staleResult.reason, /cotação mais recente desatualizada/);
+});
+
+test('waits until the full five-minute window has elapsed', () => {
+  const result = analyzeChart(
+    makeLinearPoints(0.3),
+    DEFAULT_ANALYSIS_WINDOW_MS,
+    DEFAULT_ANALYSIS_WINDOW_MS - 1,
+  );
+
+  assert.equal(result.signal, 'AGUARDAR');
+  assert.match(result.reason, /antes de avaliar um sinal/);
 });

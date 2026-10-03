@@ -14,15 +14,119 @@ export type AnalysisResult = {
   reason: string;
 };
 
-const MIN_POINTS_FOR_SIGNAL = 8;
 export const DEFAULT_ANALYSIS_WINDOW_MS = 5 * 60 * 1000;
+
+const SAMPLE_INTERVAL_MS = 5 * 1000;
+const MIN_POINTS_FOR_SIGNAL = Math.ceil(DEFAULT_ANALYSIS_WINDOW_MS / SAMPLE_INTERVAL_MS / 2);
+const MAX_SAMPLE_AGE_MS = 15 * 1000;
+const MAX_SAMPLE_GAP_MS = 20 * 1000;
+const BUCKET_DURATION_MS = 30 * 1000;
+const BUCKET_BOUNDARY_TOLERANCE_MS = 15 * 1000;
+const MIN_SIGNAL_MOVE_PERCENT = 0.12;
+const MIN_TREND_MOVE_PERCENT = 0.04;
+const MIN_BUCKET_MOVE_PERCENT = 0.005;
+const MIN_PATH_EFFICIENCY = 0.55;
+const MIN_DIRECTIONAL_CONSISTENCY = 0.7;
+const MAX_COUNTERTREND_SHARE = 0.2;
+const MIN_SIGNAL_CONFIDENCE = 68;
+
+type DirectionalSegments = {
+  aligned: number;
+  opposed: number;
+  total: number;
+  consistency: number;
+  streak: number;
+};
+
+function nearestPriceAt(points: ChartPoint[], timestamp: number): number | null {
+  let nearest: ChartPoint | null = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+
+  for (const point of points) {
+    const distance = Math.abs(point.timestamp - timestamp);
+    if (distance < nearestDistance) {
+      nearest = point;
+      nearestDistance = distance;
+    }
+  }
+
+  return nearest && nearestDistance <= BUCKET_BOUNDARY_TOLERANCE_MS
+    ? nearest.price
+    : null;
+}
+
+function getDirectionalSegments(
+  points: ChartPoint[],
+  direction: -1 | 0 | 1,
+  windowMs: number,
+  now: number,
+): DirectionalSegments {
+  if (direction === 0 || points.length < 2) {
+    return { aligned: 0, opposed: 0, total: 0, consistency: 0, streak: 0 };
+  }
+
+  const firstTimestamp = Math.max(points[0].timestamp, now - windowMs);
+  const lastTimestamp = Math.min(points[points.length - 1].timestamp, now);
+  const observedSpan = lastTimestamp - firstTimestamp;
+  const segmentCount = Math.min(
+    Math.ceil(windowMs / BUCKET_DURATION_MS),
+    Math.round(observedSpan / BUCKET_DURATION_MS),
+  );
+
+  if (segmentCount <= 0) {
+    return { aligned: 0, opposed: 0, total: 0, consistency: 0, streak: 0 };
+  }
+
+  let aligned = 0;
+  let opposed = 0;
+  let streak = 0;
+  let countingStreak = true;
+  let total = 0;
+
+  for (let index = 0; index < segmentCount; index += 1) {
+    const segmentStart = firstTimestamp + (observedSpan * index) / segmentCount;
+    const segmentEnd = firstTimestamp + (observedSpan * (index + 1)) / segmentCount;
+    const startPrice = nearestPriceAt(points, segmentStart);
+    const endPrice = nearestPriceAt(points, segmentEnd);
+
+    if (startPrice === null || endPrice === null || startPrice <= 0) continue;
+
+    const changePercent = ((endPrice - startPrice) / startPrice) * 100;
+    total += 1;
+    if (changePercent * direction >= MIN_BUCKET_MOVE_PERCENT) {
+      aligned += 1;
+      if (countingStreak) streak += 1;
+    } else {
+      countingStreak = false;
+      if (changePercent * direction <= -MIN_BUCKET_MOVE_PERCENT) opposed += 1;
+    }
+  }
+
+  return {
+    aligned,
+    opposed,
+    total,
+    consistency: total > 0 ? aligned / total : 0,
+    streak,
+  };
+}
 
 export function analyzeChart(
   points: ChartPoint[],
   windowMs = DEFAULT_ANALYSIS_WINDOW_MS,
   now = points[points.length - 1]?.timestamp ?? 0,
 ): AnalysisResult {
-  if (points.length === 0) {
+  const validPoints = points
+    .filter((point) => (
+      Number.isFinite(point.timestamp)
+      && Number.isFinite(point.price)
+      && point.price > 0
+      && point.timestamp <= now
+    ))
+    .sort((left, right) => left.timestamp - right.timestamp)
+    .filter((point, index, sorted) => index === 0 || point.timestamp > sorted[index - 1].timestamp);
+
+  if (validPoints.length === 0) {
     return {
       signal: 'AGUARDAR',
       trend: 'LATERAL',
@@ -33,66 +137,53 @@ export function analyzeChart(
     };
   }
 
-  const elapsed = Math.max(0, now - points[0].timestamp);
+  const elapsed = Math.max(0, now - validPoints[0].timestamp);
   const windowStart = now - windowMs;
-  let firstInWindow = points.findIndex((point) => point.timestamp >= windowStart);
-  if (firstInWindow < 0) firstInWindow = points.length - 1;
-  if (firstInWindow > 0) firstInWindow -= 1;
-  const windowPoints = points.slice(firstInWindow);
+  const windowPoints = validPoints.filter((point) => point.timestamp >= windowStart);
+
+  if (windowPoints.length === 0) {
+    return {
+      signal: 'AGUARDAR',
+      trend: 'LATERAL',
+      confidence: 0,
+      streak: 0,
+      slope: 0,
+      reason: 'Sem cotações recentes suficientes para avaliar a janela de 5 minutos.',
+    };
+  }
+
   const firstPrice = windowPoints[0].price;
-  const latestPrice = points[points.length - 1].price;
+  const latestPoint = windowPoints[windowPoints.length - 1];
+  const latestPrice = latestPoint.price;
   const priceChangePercent = firstPrice > 0 ? ((latestPrice - firstPrice) / firstPrice) * 100 : 0;
   const deltas = windowPoints.slice(1).map((point, index) => {
     const previousPrice = windowPoints[index].price;
     return previousPrice > 0 ? ((point.price - previousPrice) / previousPrice) * 100 : 0;
   });
-  const minimumDirectionMovePercent = Math.max(
-    0.015,
-    0.08 * Math.min(1, elapsed / windowMs),
-  );
-  const direction = priceChangePercent > minimumDirectionMovePercent
+  const direction: -1 | 0 | 1 = priceChangePercent >= MIN_TREND_MOVE_PERCENT
     ? 1
-    : priceChangePercent < -minimumDirectionMovePercent
+    : priceChangePercent <= -MIN_TREND_MOVE_PERCENT
       ? -1
       : 0;
-  let streak = 0;
-
-  for (let index = deltas.length - 1; index >= 0; index -= 1) {
-    const deltaDirection = deltas[index] > 0.003 ? 1 : deltas[index] < -0.003 ? -1 : 0;
-    if (direction === 0 || deltaDirection !== direction) break;
-    streak += 1;
-  }
-
+  const segments = getDirectionalSegments(windowPoints, direction, windowMs, now);
   const totalMovement = deltas.reduce((sum, delta) => sum + Math.abs(delta), 0);
   const pathEfficiency = totalMovement > 0
     ? Math.min(1, Math.abs(priceChangePercent) / totalMovement)
     : 0;
-  const movementStrength = Math.min(1, Math.abs(priceChangePercent) / 0.35);
-  const confidence = Math.round((movementStrength * 0.65 + pathEfficiency * 0.35) * 100);
-  const trend = direction > 0 ? 'ALTA' : direction < 0 ? 'BAIXA' : 'LATERAL';
+  const movementStrength = Math.min(1, Math.abs(priceChangePercent) / 0.3);
+  const confidence = Math.round((
+    movementStrength * 0.4
+    + pathEfficiency * 0.3
+    + segments.consistency * 0.3
+  ) * 100);
+  const trend: AnalysisResult['trend'] = direction > 0 ? 'ALTA' : direction < 0 ? 'BAIXA' : 'LATERAL';
   const fullWindowCollected = elapsed >= windowMs;
-
-  if (fullWindowCollected && points.length >= MIN_POINTS_FOR_SIGNAL && direction > 0 && confidence >= 68 && streak >= 3) {
-    return {
-      signal: 'POSSÍVEL COMPRA',
-      trend,
-      confidence,
-      streak,
-      slope: priceChangePercent,
-      reason: `BTC/USD subiu ${priceChangePercent.toFixed(2)}% na janela real de 5 minutos.`,
-    };
-  }
-
-  if (fullWindowCollected && points.length >= MIN_POINTS_FOR_SIGNAL && direction < 0 && confidence >= 68 && streak >= 3) {
-    return {
-      signal: 'POSSÍVEL VENDA',
-      trend,
-      confidence,
-      streak,
-      slope: priceChangePercent,
-      reason: `BTC/USD caiu ${Math.abs(priceChangePercent).toFixed(2)}% na janela real de 5 minutos.`,
-    };
-  }
+  const resultBase = {
+    trend,
+    confidence,
+    streak: segments.streak,
+    slope: priceChangePercent,
+  };
 
   if (!fullWindowCollected) {
     const elapsedSeconds = Math.floor(elapsed / 1000);
@@ -101,23 +192,81 @@ export function analyzeChart(
     const collected = `${elapsedMinutes}:${String(remainingSeconds).padStart(2, '0')}`;
     return {
       signal: 'AGUARDAR',
-      trend,
-      confidence,
-      streak,
-      slope: priceChangePercent,
+      ...resultBase,
       reason: `Coletando preços reais: ${collected} de ${Math.ceil(windowMs / 60000)}:00 antes de avaliar um sinal.`,
     };
   }
 
+  const latestSampleAge = Math.max(0, now - latestPoint.timestamp);
+  const observedSpan = latestPoint.timestamp - windowPoints[0].timestamp;
+  const maxSampleGap = windowPoints.slice(1).reduce(
+    (largest, point, index) => Math.max(largest, point.timestamp - windowPoints[index].timestamp),
+    0,
+  );
+  const dataIssues: string[] = [];
+
+  if (windowPoints.length < MIN_POINTS_FOR_SIGNAL) {
+    dataIssues.push(`apenas ${windowPoints.length} amostras`);
+  }
+  if (windowPoints[0].timestamp - windowStart > MAX_SAMPLE_AGE_MS) {
+    dataIssues.push('início da janela sem cobertura');
+  }
+  if (latestSampleAge > MAX_SAMPLE_AGE_MS) {
+    dataIssues.push('cotação mais recente desatualizada');
+  }
+  if (observedSpan < windowMs - 2 * MAX_SAMPLE_AGE_MS) {
+    dataIssues.push('cobertura temporal insuficiente');
+  }
+  if (maxSampleGap > MAX_SAMPLE_GAP_MS) {
+    dataIssues.push('lacuna longa entre cotações');
+  }
+  if (segments.total < Math.ceil(windowMs / BUCKET_DURATION_MS) - 1) {
+    dataIssues.push('consistência temporal não pôde ser medida');
+  }
+
+  if (dataIssues.length > 0) {
+    return {
+      signal: 'AGUARDAR',
+      ...resultBase,
+      reason: `Dados insuficientes na janela de 5 minutos (${dataIssues.join('; ')}).`,
+    };
+  }
+
+  const consistencyLabel = `${segments.aligned}/${segments.total} períodos`;
+  const countertrendLabel = `${segments.opposed}/${segments.total} contra`;
+  const movementLabel = `${Math.abs(priceChangePercent).toFixed(2)}%`;
+  const signalIssues: string[] = [];
+
+  if (direction === 0 || Math.abs(priceChangePercent) < MIN_SIGNAL_MOVE_PERCENT) {
+    signalIssues.push(`variação de ${movementLabel} abaixo do mínimo de ${MIN_SIGNAL_MOVE_PERCENT.toFixed(2)}%`);
+  }
+  if (
+    segments.consistency < MIN_DIRECTIONAL_CONSISTENCY
+    || segments.opposed / segments.total > MAX_COUNTERTREND_SHARE
+  ) {
+    signalIssues.push(`tendência inconsistente (${consistencyLabel} na direção, ${countertrendLabel})`);
+  }
+  if (pathEfficiency < MIN_PATH_EFFICIENCY) {
+    signalIssues.push(`trajetória irregular (${Math.round(pathEfficiency * 100)}% de eficiência)`);
+  }
+  if (confidence < MIN_SIGNAL_CONFIDENCE) {
+    signalIssues.push(`força agregada de ${confidence}% abaixo do mínimo de ${MIN_SIGNAL_CONFIDENCE}%`);
+  }
+
+  if (signalIssues.length > 0) {
+    return {
+      signal: 'AGUARDAR',
+      ...resultBase,
+      reason: `Movimento de ${movementLabel}, mas ${signalIssues.slice(0, 2).join('; ')}. AGUARDAR.`,
+    };
+  }
+
+  const signal = direction > 0 ? 'POSSÍVEL COMPRA' : 'POSSÍVEL VENDA';
+  const movementVerb = direction > 0 ? 'subiu' : 'caiu';
   return {
-    signal: 'AGUARDAR',
-    trend,
-    confidence,
-    streak,
-    slope: priceChangePercent,
-    reason: direction === 0
-      ? 'Variação de BTC/USD sem tendência clara na janela de 5 minutos.'
-      : 'Tendência identificada, mas sem confirmação suficiente nos preços reais.',
+    signal,
+    ...resultBase,
+    reason: `BTC/USD ${movementVerb} ${movementLabel} em 5 min; ${consistencyLabel} na direção e ${Math.round(pathEfficiency * 100)}% de eficiência. Confirmação mede a força dos sinais, não a chance de acerto.`,
   };
 }
 
