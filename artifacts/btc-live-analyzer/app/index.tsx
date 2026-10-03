@@ -1,6 +1,7 @@
 import { Feather } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import React, { useState } from 'react';
+import Svg, { Circle, Line, Polyline } from 'react-native-svg';
 import {
   Modal,
   Pressable,
@@ -12,6 +13,8 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors } from '@/hooks/useColors';
 import { AnalyzerProvider, useAnalyzer } from '@/context/AnalyzerContext';
+import { DEFAULT_ANALYSIS_WINDOW_MS } from '@/lib/analysis';
+import type { ChartPoint } from '@/lib/analysis';
 import type { CaptureRegion } from '@/lib/screenCapture';
 
 const signalColor = {
@@ -21,6 +24,13 @@ const signalColor = {
 } as const;
 
 const centralRegion: CaptureRegion = { left: 8, top: 24, width: 84, height: 48 };
+
+function formatHistoryProgress(durationMs: number) {
+  const totalSeconds = Math.floor(Math.min(durationMs, DEFAULT_ANALYSIS_WINDOW_MS) / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = String(totalSeconds % 60).padStart(2, '0');
+  return `${minutes}:${seconds} / 5:00`;
+}
 
 function StatusPill({ label, active, tone }: { label: string; active: boolean; tone: 'green' | 'blue' }) {
   const colors = useColors();
@@ -42,38 +52,67 @@ function SignalBadge({ signal }: { signal: 'POSSÍVEL COMPRA' | 'POSSÍVEL VENDA
   );
 }
 
-function ChartPreview({ region }: { region: CaptureRegion }) {
+function ChartPreview({ points, currentPrice }: { points: ChartPoint[]; currentPrice: number | null }) {
   const colors = useColors();
-  const points = [0.63, 0.58, 0.61, 0.52, 0.55, 0.46, 0.49, 0.38, 0.42, 0.3, 0.34, 0.24, 0.27, 0.18];
+  const visiblePoints = points.slice(-60);
+  const prices = visiblePoints.map((point) => point.price);
+  const minimum = prices.length > 0 ? Math.min(...prices) : 0;
+  const maximum = prices.length > 0 ? Math.max(...prices) : 0;
+  const rawRange = maximum - minimum;
+  const displayRange = rawRange > 0 ? rawRange * 1.2 : Math.max(maximum * 0.001, 1);
+  const displayMinimum = rawRange > 0 ? minimum - rawRange * 0.1 : minimum - displayRange / 2;
+  const linePoints = visiblePoints.map((point, index) => {
+    const x = 8 + (index / Math.max(visiblePoints.length - 1, 1)) * 304;
+    const y = 6 + ((displayMinimum + displayRange - point.price) / displayRange) * 80;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(' ');
+  const trendColor = visiblePoints.length < 2
+    ? colors.primary
+    : visiblePoints[visiblePoints.length - 1].price >= visiblePoints[0].price
+      ? '#55d6a6'
+      : '#ee6f5c';
+
+  const formatPrice = (price: number | null) => price === null
+    ? '—'
+    : new Intl.NumberFormat('en-US', {
+        style: 'currency',
+        currency: 'USD',
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      }).format(price);
+
   return (
     <View style={[styles.chartPreview, { backgroundColor: colors.card, borderColor: colors.border }]}>
-      <View style={[styles.regionOutline, {
-        left: `${region.left / 2}%`,
-        top: `${region.top / 2}%`,
-        width: `${region.width / 2}%`,
-        height: `${region.height / 2}%`,
-        borderColor: '#f3b63f',
-      }]} />
       <View style={styles.chartLabelRow}>
-        <Text style={[styles.chartLabel, { color: colors.mutedForeground }]}>REGIÃO DO GRÁFICO</Text>
-        <Feather name="maximize-2" size={14} color={colors.mutedForeground} />
+        <Text style={[styles.chartLabel, { color: colors.mutedForeground }]}>BTC/USD · KRAKEN</Text>
+        <Text style={[styles.chartPrice, { color: colors.foreground }]}>{formatPrice(currentPrice)}</Text>
       </View>
       <View style={styles.chartLines}>
-        {[0, 1, 2, 3].map((line) => <View key={line} style={[styles.gridLine, { top: `${line * 32}%`, backgroundColor: colors.border }]} />)}
-        {points.map((point, index) => (
-          <View
-            key={index}
-            style={[
-              styles.chartPoint,
-              {
-                left: `${8 + index * 6.4}%`,
-                top: `${point * 90}%`,
-                backgroundColor: index === points.length - 1 ? '#f3b63f' : '#55d6a6',
-              },
-            ]}
-          />
-        ))}
-        <View style={styles.chartTrend} />
+        <Svg width="100%" height="100%" viewBox="0 0 320 92" preserveAspectRatio="none">
+          {[16, 46, 76].map((y) => (
+            <Line key={y} x1="0" x2="320" y1={y} y2={y} stroke={colors.border} strokeWidth="1" />
+          ))}
+          {visiblePoints.length > 1 ? (
+            <Polyline
+              points={linePoints}
+              fill="none"
+              stroke={trendColor}
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          ) : null}
+          {visiblePoints.length === 1 ? (
+            <Circle cx="160" cy="46" r="3.5" fill={trendColor} />
+          ) : null}
+        </Svg>
+        {visiblePoints.length < 2 ? (
+          <View style={styles.chartEmptyState}>
+            <Text style={[styles.chartEmptyText, { color: colors.mutedForeground }]}>
+              {visiblePoints.length === 1 ? 'Aguardando mais cotações reais…' : 'Inicie para receber preços ao vivo'}
+            </Text>
+          </View>
+        ) : null}
       </View>
     </View>
   );
@@ -124,14 +163,14 @@ function AnalyzerScreen() {
 
         <View style={styles.statusRow}>
           <StatusPill label={`CAPTURA ${analyzer.captureStatus}`} active={analyzer.captureStatus === 'ATIVA'} tone="green" />
-          <StatusPill label={analyzer.analysisStatus} active={analyzer.isRunning} tone="blue" />
+          <StatusPill label={analyzer.analysisStatus} active={analyzer.marketStatus === 'CONECTADO'} tone="blue" />
         </View>
 
         {analyzer.error ? (
           <View style={[styles.errorBox, { backgroundColor: '#301e1c', borderColor: '#754039' }]}>
             <Feather name="info" size={17} color="#ee6f5c" />
             <View style={styles.errorCopy}>
-              <Text style={styles.errorTitle}>Captura ainda não disponível</Text>
+              <Text style={styles.errorTitle}>Aviso da conexão ou captura</Text>
               <Text style={styles.errorText}>{analyzer.error}</Text>
             </View>
             <Pressable onPress={analyzer.clearError} hitSlop={10}>
@@ -161,12 +200,12 @@ function AnalyzerScreen() {
             </View>
             <View style={styles.metric}>
               <Text style={[styles.metricLabel, { color: colors.mutedForeground }]}>HISTÓRICO</Text>
-              <Text style={[styles.metricValue, { color: colors.foreground }]}>{Math.min(5, Math.floor((Date.now() - (analyzer.history[0]?.timestamp ?? Date.now())) / 60000))} min</Text>
+              <Text style={[styles.metricValue, { color: colors.foreground }]}>{formatHistoryProgress(analyzer.historyDurationMs)}</Text>
             </View>
           </View>
         </View>
 
-        <ChartPreview region={analyzer.region} />
+        <ChartPreview points={analyzer.history} currentPrice={analyzer.currentPrice} />
 
         <View style={styles.actionRow}>
           <Pressable
@@ -194,8 +233,8 @@ function AnalyzerScreen() {
             <Feather name="crop" size={18} color={colors.accentForeground} />
           </View>
           <View style={styles.regionCopy}>
-            <Text style={[styles.regionTitle, { color: colors.foreground }]}>Área do gráfico</Text>
-            <Text style={[styles.regionSubtitle, { color: colors.mutedForeground }]}>Definida · {analyzer.region.width}% × {analyzer.region.height}% da tela</Text>
+            <Text style={[styles.regionTitle, { color: colors.foreground }]}>Área da captura local</Text>
+            <Text style={[styles.regionSubtitle, { color: colors.mutedForeground }]}>{analyzer.region.width}% × {analyzer.region.height}% da tela</Text>
           </View>
           <Feather name="chevron-right" size={19} color={colors.mutedForeground} />
         </Pressable>
@@ -213,13 +252,13 @@ function AnalyzerScreen() {
             <View style={styles.modalHeader}>
               <View>
                 <Text style={[styles.modalEyebrow, { color: colors.primary }]}>CONFIGURAÇÃO</Text>
-                <Text style={[styles.modalTitle, { color: colors.foreground }]}>Área do gráfico</Text>
+                <Text style={[styles.modalTitle, { color: colors.foreground }]}>Área da captura local</Text>
               </View>
               <Pressable onPress={() => setShowRegion(false)} hitSlop={12}>
                 <Feather name="x" size={22} color={colors.mutedForeground} />
               </Pressable>
             </View>
-            <Text style={[styles.modalText, { color: colors.mutedForeground }]}>A análise considerará somente o retângulo selecionado na tela capturada.</Text>
+            <Text style={[styles.modalText, { color: colors.mutedForeground }]}>Esta área continua disponível para a captura de tela local. Os sinais desta tela usam cotações públicas reais de BTC/USD.</Text>
             <View style={[styles.regionDemo, { borderColor: colors.border, backgroundColor: colors.background }]}>
               <View style={[styles.demoFrame, { borderColor: colors.border }]} />
               <View style={[styles.demoSelection, { borderColor: colors.primary, backgroundColor: `${colors.primary}16` }]} />
@@ -281,14 +320,13 @@ const styles = StyleSheet.create({
   metric: { gap: 5 },
   metricLabel: { fontSize: 9, fontFamily: 'Inter_700Bold', letterSpacing: 0.6 },
   metricValue: { fontSize: 13, fontFamily: 'Inter_600SemiBold' },
-  chartPreview: { height: 164, borderRadius: 20, borderWidth: 1, overflow: 'hidden', padding: 14 },
+  chartPreview: { height: 164, borderRadius: 20, borderWidth: 1, overflow: 'hidden', padding: 14, gap: 8 },
   chartLabelRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   chartLabel: { fontSize: 9, fontFamily: 'Inter_700Bold', letterSpacing: 1 },
-  chartLines: { flex: 1, marginTop: 12, position: 'relative', overflow: 'hidden' },
-  gridLine: { position: 'absolute', left: 0, right: 0, height: 1 },
-  chartPoint: { position: 'absolute', width: 6, height: 6, borderRadius: 3 },
-  chartTrend: { position: 'absolute', left: '8%', right: '6%', top: '45%', height: 2, backgroundColor: '#55d6a6', transform: [{ rotate: '-16deg' }] },
-  regionOutline: { position: 'absolute', borderWidth: 1, borderStyle: 'dashed', borderRadius: 7, zIndex: 2 },
+  chartPrice: { fontSize: 13, fontFamily: 'Inter_600SemiBold' },
+  chartLines: { flex: 1, position: 'relative', overflow: 'hidden' },
+  chartEmptyState: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
+  chartEmptyText: { fontSize: 11, fontFamily: 'Inter_500Medium' },
   actionRow: { flexDirection: 'row', gap: 10 },
   primaryButton: { flex: 1, minHeight: 52, borderRadius: 16, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 },
   primaryButtonText: { fontSize: 12, fontFamily: 'Inter_700Bold', letterSpacing: 0.7 },

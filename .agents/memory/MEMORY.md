@@ -1,3 +1,4 @@
 - [Android capture boundary](android-capture-boundary.md) — MediaProjection and a foreground service require a native Android build; Expo Go cannot provide a truthful screen-capture implementation.
 - [Android build validation](android-build-validation.md) — Native autolinking validates in this workspace, but APK compilation needs a persistent Android SDK and a stable JDK.
 - [Expo preview dependency links](expo-preview-dependency-links.md) — If the mobile preview returns 502, check whether the artifact’s pnpm Expo link is stale before changing its workflow or Expo settings.
+- [BTC analyzer scope](btc-analyzer-scope.md) — Signals are informational only; preserve screen capture and Expo/EAS configuration.
