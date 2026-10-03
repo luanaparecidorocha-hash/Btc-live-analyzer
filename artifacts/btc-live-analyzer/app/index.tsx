@@ -215,7 +215,9 @@ function AnalyzerScreen() {
             style={({ pressed }) => [styles.primaryButton, { backgroundColor: analyzer.isRunning ? colors.muted : colors.primary, opacity: pressed ? 0.82 : 1 }]}
           >
             <Feather name="play" size={17} color={analyzer.isRunning ? colors.mutedForeground : colors.primaryForeground} />
-            <Text style={[styles.primaryButtonText, { color: analyzer.isRunning ? colors.mutedForeground : colors.primaryForeground }]}>INICIAR ANÁLISE</Text>
+            <Text style={[styles.primaryButtonText, { color: analyzer.isRunning ? colors.mutedForeground : colors.primaryForeground }]}>
+              {analyzer.collectionComplete ? 'NOVA ANÁLISE' : 'INICIAR ANÁLISE'}
+            </Text>
           </Pressable>
           <Pressable
             testID="stop-analysis"
@@ -223,8 +225,10 @@ function AnalyzerScreen() {
             disabled={!analyzer.isRunning}
             style={({ pressed }) => [styles.secondaryButton, { borderColor: analyzer.isRunning ? colors.destructive : colors.border, opacity: pressed ? 0.7 : 1 }]}
           >
-            <Feather name="square" size={15} color={analyzer.isRunning ? colors.destructive : colors.mutedForeground} />
-            <Text style={[styles.secondaryButtonText, { color: analyzer.isRunning ? colors.destructive : colors.mutedForeground }]}>PARAR</Text>
+            <Feather name={analyzer.collectionComplete ? 'check' : 'square'} size={15} color={analyzer.isRunning ? colors.destructive : colors.mutedForeground} />
+            <Text style={[styles.secondaryButtonText, { color: analyzer.isRunning ? colors.destructive : colors.mutedForeground }]}>
+              {analyzer.collectionComplete ? 'CONCLUÍDA' : 'PARAR'}
+            </Text>
           </Pressable>
         </View>
 

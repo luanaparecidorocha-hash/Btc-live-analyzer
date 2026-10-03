@@ -128,3 +128,46 @@ export function trimHistory(points: ChartPoint[], now = Date.now()): ChartPoint[
   if (firstCurrentPoint > 0) firstCurrentPoint -= 1;
   return points.slice(firstCurrentPoint);
 }
+
+export type DeadlineScheduler = {
+  now: () => number;
+  setTimeout: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
+  clearTimeout: (timer: ReturnType<typeof setTimeout>) => void;
+};
+
+const systemDeadlineScheduler: DeadlineScheduler = {
+  now: () => Date.now(),
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: (timer) => clearTimeout(timer),
+};
+
+export function scheduleAnalysisDeadline(
+  collectionStartedAt: number,
+  onComplete: (completedAt: number) => void,
+  scheduler: DeadlineScheduler = systemDeadlineScheduler,
+): () => void {
+  const completedAt = collectionStartedAt + DEFAULT_ANALYSIS_WINDOW_MS;
+  let cancelled = false;
+  let timer: ReturnType<typeof setTimeout>;
+
+  const checkDeadline = () => {
+    if (cancelled) return;
+    const remainingMs = completedAt - scheduler.now();
+    if (remainingMs > 0) {
+      timer = scheduler.setTimeout(checkDeadline, remainingMs);
+      return;
+    }
+    cancelled = true;
+    onComplete(completedAt);
+  };
+
+  timer = scheduler.setTimeout(
+    checkDeadline,
+    Math.max(0, completedAt - scheduler.now()),
+  );
+
+  return () => {
+    cancelled = true;
+    scheduler.clearTimeout(timer);
+  };
+}

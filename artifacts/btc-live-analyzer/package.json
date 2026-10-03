@@ -8,6 +8,7 @@
     "build": "node scripts/build.js",
     "serve": "node server/serve.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:analysis-timer": "node --experimental-strip-types --test scripts/analysis-timer.test.mjs",
     "doctor": "pnpm dlx expo-doctor@latest",
     "android:prebuild": "expo prebuild --platform android --no-install",
     "android:debug": "expo run:android",
