@@ -3,3 +3,4 @@
 - [Expo preview dependency links](expo-preview-dependency-links.md) — If the mobile preview returns 502, check whether the artifact’s pnpm Expo link is stale before changing its workflow or Expo settings.
 - [BTC analyzer scope](btc-analyzer-scope.md) — Signals are informational only; preserve screen capture and Expo/EAS configuration.
 - [Android background limits](android-background-limits.md) — Respect dataSync limits; capture is not an exemption, and web/bundle checks do not prove native background execution.
+- [Expo MCP build directory](expo-mcp-build-directory.md) — Pass the monorepo base directory explicitly; a build request without it looked for eas.json at the repository root.
