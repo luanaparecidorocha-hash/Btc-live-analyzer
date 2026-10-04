@@ -20,3 +20,9 @@ Internal engine tests must be separate, disabled by default and visibly simulate
 **Why:** The user set these informational and isolation constraints and repeatedly required preserving the tested decision engine, real Kraken source, persistent history and Expo/EAS configuration.
 
 **How to apply:** Anchor each window to its first new live quote and assign boundary quotes only to the next cycle. Freeze each completed window and preserve capture permissions, region settings and Expo/EAS setup. Keep synthetic inputs and results outside live collection and persistence; never duplicate decision logic.
+
+When investigating recognition of an Expo authorization already granted in the browser, do not request a new OAuth authorization. Limit recovery to the existing Replit integration; do not change BTC Live Analyzer code or Expo/EAS configuration.
+
+**Why:** The user repeatedly required preserving the existing authorization and isolating connection recovery from app changes.
+
+**How to apply:** Look for an existing connection that can be attached. If recovery is unavailable, distinguish observed connection state from an unverified callback or permission failure; do not substitute another OAuth flow.
