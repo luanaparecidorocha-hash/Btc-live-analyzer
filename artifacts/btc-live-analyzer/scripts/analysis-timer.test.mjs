@@ -46,8 +46,11 @@ const SAMPLE_INTERVAL_MS = 5_000;
 const DEFAULT_PRICE = 80_000;
 
 function makeLinearPoints(totalChangePercent, count = 60) {
+  const lastSampleTimestamp = DEFAULT_ANALYSIS_WINDOW_MS - SAMPLE_INTERVAL_MS;
   return Array.from({ length: count }, (_, index) => {
-    const timestamp = index * SAMPLE_INTERVAL_MS;
+    const timestamp = count === 60
+      ? index * SAMPLE_INTERVAL_MS
+      : (index * lastSampleTimestamp) / Math.max(count - 1, 1);
     const progress = timestamp / DEFAULT_ANALYSIS_WINDOW_MS;
     return {
       timestamp,
@@ -177,6 +180,7 @@ test('waits when a completed window has too few or stale samples', () => {
   );
   assert.equal(sparseResult.signal, 'AGUARDAR');
   assert.match(sparseResult.reason, /apenas 8 amostras/);
+  assert.ok(sparseResult.confidence < 50);
 
   const stalePoints = makeLinearPoints(0.3).slice(0, 40);
   const staleResult = analyzeChart(
@@ -186,6 +190,7 @@ test('waits when a completed window has too few or stale samples', () => {
   );
   assert.equal(staleResult.signal, 'AGUARDAR');
   assert.match(staleResult.reason, /cotação mais recente desatualizada/);
+  assert.ok(staleResult.confidence < 50);
 });
 
 test('waits until the full five-minute window has elapsed', () => {

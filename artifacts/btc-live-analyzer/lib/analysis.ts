@@ -166,18 +166,35 @@ export function analyzeChart(
       ? -1
       : 0;
   const segments = getDirectionalSegments(windowPoints, direction, windowMs, now);
+  const latestSampleAge = Math.max(0, now - latestPoint.timestamp);
+  const observedSpan = latestPoint.timestamp - windowPoints[0].timestamp;
+  const maxSampleGap = windowPoints.slice(1).reduce(
+    (largest, point, index) => Math.max(largest, point.timestamp - windowPoints[index].timestamp),
+    0,
+  );
   const totalMovement = deltas.reduce((sum, delta) => sum + Math.abs(delta), 0);
   const pathEfficiency = totalMovement > 0
     ? Math.min(1, Math.abs(priceChangePercent) / totalMovement)
     : 0;
   const movementStrength = Math.min(1, Math.abs(priceChangePercent) / 0.3);
-  const confidence = Math.round((
+  const rawConfidence = (
     movementStrength * 0.4
     + pathEfficiency * 0.3
     + segments.consistency * 0.3
-  ) * 100);
+  ) * 100;
   const trend: AnalysisResult['trend'] = direction > 0 ? 'ALTA' : direction < 0 ? 'BAIXA' : 'LATERAL';
   const fullWindowCollected = elapsed >= windowMs;
+  const requiredSegmentCount = Math.max(1, Math.ceil(windowMs / BUCKET_DURATION_MS) - 1);
+  const fullWindowDataQuality = Math.min(
+    1,
+    windowPoints.length / MIN_POINTS_FOR_SIGNAL,
+    observedSpan / Math.max(1, windowMs - 2 * MAX_SAMPLE_AGE_MS),
+    MAX_SAMPLE_AGE_MS / Math.max(latestSampleAge, MAX_SAMPLE_AGE_MS),
+    MAX_SAMPLE_GAP_MS / Math.max(maxSampleGap, MAX_SAMPLE_GAP_MS),
+    MAX_SAMPLE_AGE_MS / Math.max(windowPoints[0].timestamp - windowStart, MAX_SAMPLE_AGE_MS),
+    segments.total / requiredSegmentCount,
+  );
+  const confidence = Math.round(rawConfidence * (fullWindowCollected ? fullWindowDataQuality : 1));
   const resultBase = {
     trend,
     confidence,
@@ -197,12 +214,6 @@ export function analyzeChart(
     };
   }
 
-  const latestSampleAge = Math.max(0, now - latestPoint.timestamp);
-  const observedSpan = latestPoint.timestamp - windowPoints[0].timestamp;
-  const maxSampleGap = windowPoints.slice(1).reduce(
-    (largest, point, index) => Math.max(largest, point.timestamp - windowPoints[index].timestamp),
-    0,
-  );
   const dataIssues: string[] = [];
 
   if (windowPoints.length < MIN_POINTS_FOR_SIGNAL) {
