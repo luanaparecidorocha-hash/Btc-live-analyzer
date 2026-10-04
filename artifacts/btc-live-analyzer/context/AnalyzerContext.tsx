@@ -1,11 +1,9 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Platform } from 'react-native';
 import {
   analyzeChart,
   DEFAULT_ANALYSIS_WINDOW_MS,
-  scheduleAnalysisDeadline,
-  trimHistory,
 } from '@/lib/analysis';
 import type { ChartPoint, Signal } from '@/lib/analysis';
 import { connectBtcUsdTicker } from '@/lib/marketData';
@@ -23,6 +21,7 @@ import {
 import { notifySignal, prepareNotifications } from '@/lib/notifications';
 import { createAnalysisHistoryStore, mergeAnalysisHistory } from '@/lib/analysisHistory';
 import type { AnalysisRecord } from '@/lib/analysisHistory';
+import { createContinuousCollection } from '@/lib/continuousCollection';
 
 export type SignalRecord = AnalysisRecord;
 
@@ -46,7 +45,9 @@ type AnalyzerContextValue = {
   lastSignal: Signal;
   lastSignalAt: number | null;
   analysis: ReturnType<typeof analyzeChart>;
-  collectionComplete: boolean;
+  cycleNumber: number;
+  completedCycle: SignalRecord | null;
+  dismissCycleNotice: () => void;
   error: string | null;
   setRegion: (region: CaptureRegion) => void;
   startAnalysis: () => Promise<void>;
@@ -56,7 +57,6 @@ type AnalyzerContextValue = {
 
 const REGION_KEY = '@btc-live-analyzer/region';
 const defaultRegion: CaptureRegion = { left: 8, top: 24, width: 84, height: 48 };
-const PRICE_SAMPLE_INTERVAL_MS = 5 * 1000;
 const CAPTURE_FRAME_SAMPLE_INTERVAL_MS = 15 * 1000;
 const AnalyzerContext = createContext<AnalyzerContextValue | null>(null);
 
@@ -67,8 +67,9 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
   const [captureHistory, setCaptureHistory] = useState<CaptureHistoryPoint[]>([]);
   const [collectionStartedAt, setCollectionStartedAt] = useState<number | null>(null);
   const [clockNow, setClockNow] = useState(0);
-  const [collectionComplete, setCollectionComplete] = useState(false);
-  const [finalAnalysis, setFinalAnalysis] = useState<ReturnType<typeof analyzeChart> | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [cycleNumber, setCycleNumber] = useState(1);
+  const [completedCycle, setCompletedCycle] = useState<SignalRecord | null>(null);
   const [currentPrice, setCurrentPrice] = useState<number | null>(null);
   const [lastPriceAt, setLastPriceAt] = useState<number | null>(null);
   const [signalHistory, setSignalHistory] = useState<SignalRecord[]>([]);
@@ -80,13 +81,42 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
   const [historyError, setHistoryError] = useState<string | null>(null);
   const historyStore = useMemo(() => createAnalysisHistoryStore(AsyncStorage), []);
   const marketConnection = useRef<MarketFeedConnection | null>(null);
-  const historyRef = useRef<ChartPoint[]>([]);
-  const collectionStartedAtRef = useRef<number | null>(null);
-  const collectionClosedRef = useRef(true);
   const captureStatusRef = useRef<CaptureStatus>('DESATIVADA');
-  const finishCollectionRef = useRef<(completedAt: number) => void>(() => undefined);
-  const cancelDeadlineRef = useRef<(() => void) | null>(null);
-  const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const runGeneration = useRef(0);
+  const collection = useMemo(() => createContinuousCollection({
+    windowMs: DEFAULT_ANALYSIS_WINDOW_MS,
+    onUpdate: (state) => {
+      setCollectionStartedAt(state.startedAt);
+      setClockNow(state.now);
+      setCycleNumber(state.cycleNumber);
+      setHistory(state.points);
+    },
+    onComplete: (points, completedAt) => {
+      const result = analyzeChart([...points], DEFAULT_ANALYSIS_WINDOW_MS, completedAt);
+      const record: SignalRecord = {
+        timestamp: completedAt,
+        signal: result.signal,
+        direction: result.trend,
+        confidence: result.confidence,
+        durationMs: DEFAULT_ANALYSIS_WINDOW_MS,
+        reason: result.reason,
+      };
+      setLastSignal(result.signal);
+      setLastSignalAt(completedAt);
+      setCompletedCycle(record);
+      setCaptureHistory([]);
+      setSignalHistory((current) => mergeAnalysisHistory(current, [record]));
+      void historyStore.append(record)
+        .then((saved) => {
+          setSignalHistory((current) => mergeAnalysisHistory(saved, current));
+          setHistoryError(null);
+        })
+        .catch(() => setHistoryError('Análise mantida nesta sessão, mas não foi possível salvar o histórico no dispositivo.'));
+      if (result.signal !== 'AGUARDAR') {
+        void notifySignal(result.signal, result.confidence).catch(() => undefined);
+      }
+    },
+  }), [historyStore]);
 
   useEffect(() => {
     AsyncStorage.getItem(REGION_KEY)
@@ -116,7 +146,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
       if (status === 'ATIVA') setCaptureError(null);
     });
     const frameSubscription = subscribeCaptureFrames((frame) => {
-      if (collectionClosedRef.current) return;
+      if (!collection.isRunning()) return;
       setCaptureHistory((current) => {
         const lastPoint = current[current.length - 1];
         if (lastPoint && frame.timestamp - lastPoint.timestamp < CAPTURE_FRAME_SAMPLE_INTERVAL_MS) {
@@ -133,28 +163,23 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
       stateSubscription.remove();
       frameSubscription.remove();
     };
-  }, []);
+  }, [collection]);
 
   useEffect(() => () => {
-    collectionClosedRef.current = true;
-    cancelDeadlineRef.current?.();
-    cancelDeadlineRef.current = null;
-    if (progressTimerRef.current !== null) clearInterval(progressTimerRef.current);
-    progressTimerRef.current = null;
+    runGeneration.current += 1;
+    collection.stop();
     marketConnection.current?.close();
     marketConnection.current = null;
-  }, []);
+  }, [collection]);
 
-  const historyDurationMs = collectionComplete
-    ? DEFAULT_ANALYSIS_WINDOW_MS
-    : collectionStartedAt !== null
+  const historyDurationMs = collectionStartedAt !== null
       ? Math.min(
           DEFAULT_ANALYSIS_WINDOW_MS,
           Math.max(0, clockNow - collectionStartedAt),
         )
       : 0;
   const analysis = useMemo(
-    () => finalAnalysis ?? analyzeChart(
+    () => analyzeChart(
       history,
       DEFAULT_ANALYSIS_WINDOW_MS,
       collectionStartedAt === null
@@ -164,119 +189,20 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
             collectionStartedAt + DEFAULT_ANALYSIS_WINDOW_MS - 1,
           ),
     ),
-    [clockNow, collectionStartedAt, finalAnalysis, history, lastPriceAt],
+    [clockNow, collectionStartedAt, history, lastPriceAt],
   );
-  const isRunning = !collectionComplete && marketStatus !== 'DESATIVADA';
-  const analysisStatus = collectionComplete
-    ? 'COLETA CONCLUÍDA'
-    : marketStatus === 'RECONECTANDO'
+  const analysisStatus = marketStatus === 'RECONECTANDO'
       ? 'RECONECTANDO'
       : marketStatus === 'CONECTANDO'
         ? 'CONECTANDO'
+        : marketStatus === 'CONECTADO' && collectionStartedAt === null
+          ? 'AGUARDANDO DADOS'
         : marketStatus === 'CONECTADO' && historyDurationMs < DEFAULT_ANALYSIS_WINDOW_MS
           ? 'COLETANDO DADOS'
           : marketStatus === 'CONECTADO'
             ? 'ANALISANDO'
             : 'AGUARDANDO DADOS';
   const error = marketError ?? captureError ?? historyError;
-  const cancelCollectionTimers = useCallback(() => {
-    cancelDeadlineRef.current?.();
-    cancelDeadlineRef.current = null;
-    if (progressTimerRef.current !== null) clearInterval(progressTimerRef.current);
-    progressTimerRef.current = null;
-  }, []);
-
-  const finishCollection = useCallback((completedAt: number) => {
-    if (collectionClosedRef.current) return;
-    const startedAt = collectionStartedAtRef.current;
-    if (startedAt === null || completedAt < startedAt + DEFAULT_ANALYSIS_WINDOW_MS) return;
-
-    collectionClosedRef.current = true;
-    cancelCollectionTimers();
-    const result = analyzeChart(
-      historyRef.current,
-      DEFAULT_ANALYSIS_WINDOW_MS,
-      completedAt,
-    );
-    const record: SignalRecord = {
-      timestamp: completedAt,
-      signal: result.signal,
-      direction: result.trend,
-      confidence: result.confidence,
-      durationMs: DEFAULT_ANALYSIS_WINDOW_MS,
-      reason: result.reason,
-    };
-
-    setClockNow(completedAt);
-    setFinalAnalysis(result);
-    setCollectionComplete(true);
-    setLastSignal(result.signal);
-    setLastSignalAt(completedAt);
-    setSignalHistory((current) => mergeAnalysisHistory(current, [record]));
-    void historyStore.append(record)
-      .then((saved) => {
-        setSignalHistory((current) => mergeAnalysisHistory(saved, current));
-        setHistoryError(null);
-      })
-      .catch(() => setHistoryError('Análise mantida nesta sessão, mas não foi possível salvar o histórico no dispositivo.'));
-
-    marketConnection.current?.close();
-    marketConnection.current = null;
-    setMarketStatus('DESATIVADA');
-    setMarketError(null);
-    if (result.signal !== 'AGUARDAR') {
-      notifySignal(result.signal, result.confidence).catch(() => undefined);
-    }
-
-    if (
-      Platform.OS !== 'web'
-      && isNativeCaptureAvailable()
-      && captureStatusRef.current === 'ATIVA'
-    ) {
-      void stopScreenCapture()
-        .then(() => {
-          captureStatusRef.current = 'DESATIVADA';
-          setCaptureStatus('DESATIVADA');
-          setCaptureError(null);
-        })
-        .catch((captureStopError) => {
-          const message = captureStopError instanceof Error
-            ? captureStopError.message
-            : 'Não foi possível interromper a captura.';
-          captureStatusRef.current = 'ERRO';
-          setCaptureStatus('ERRO');
-          setCaptureError(message);
-        });
-    }
-  }, [cancelCollectionTimers, historyStore]);
-  finishCollectionRef.current = finishCollection;
-
-  useEffect(() => {
-    if (collectionStartedAt === null || collectionComplete) return;
-
-    const cancelDeadline = scheduleAnalysisDeadline(
-      collectionStartedAt,
-      (completedAt) => finishCollectionRef.current(completedAt),
-    );
-    cancelDeadlineRef.current = cancelDeadline;
-    const progressTimer = setInterval(() => {
-      const completedAt = collectionStartedAt + DEFAULT_ANALYSIS_WINDOW_MS;
-      const now = Date.now();
-      if (now >= completedAt) {
-        finishCollectionRef.current(completedAt);
-      } else {
-        setClockNow(now);
-      }
-    }, 1000);
-    progressTimerRef.current = progressTimer;
-
-    return () => {
-      cancelDeadline();
-      if (cancelDeadlineRef.current === cancelDeadline) cancelDeadlineRef.current = null;
-      clearInterval(progressTimer);
-      if (progressTimerRef.current === progressTimer) progressTimerRef.current = null;
-    };
-  }, [collectionComplete, collectionStartedAt]);
 
   const setRegion = (nextRegion: CaptureRegion) => {
     setRegionState(nextRegion);
@@ -284,20 +210,19 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
   };
 
   const startAnalysis = async () => {
-    cancelCollectionTimers();
+    if (collection.isRunning()) return;
+    const generation = ++runGeneration.current;
     marketConnection.current?.close();
     marketConnection.current = null;
-    collectionClosedRef.current = false;
-    collectionStartedAtRef.current = null;
-    historyRef.current = [];
+    collection.start();
+    setIsRunning(true);
+    setCompletedCycle(null);
     setMarketError(null);
     setCaptureError(null);
     setHistory([]);
     setCaptureHistory([]);
     setCollectionStartedAt(null);
     setClockNow(0);
-    setCollectionComplete(false);
-    setFinalAnalysis(null);
     setCurrentPrice(null);
     setLastPriceAt(null);
     setLastSignal('AGUARDAR');
@@ -306,56 +231,29 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
 
     marketConnection.current = connectBtcUsdTicker({
       onPrice: (point: MarketPricePoint) => {
-        if (collectionClosedRef.current) return;
-        const startedAt = collectionStartedAtRef.current;
-        if (startedAt !== null && point.timestamp >= startedAt + DEFAULT_ANALYSIS_WINDOW_MS) {
-          finishCollectionRef.current(startedAt + DEFAULT_ANALYSIS_WINDOW_MS);
-          return;
-        }
-
+        if (generation !== runGeneration.current || !collection.isRunning()) return;
         setCurrentPrice(point.price);
         setLastPriceAt(point.timestamp);
         setMarketError(null);
-        const current = historyRef.current;
-        const lastPoint = current[current.length - 1];
-        const gapExceeded = lastPoint !== undefined
-          && point.timestamp - lastPoint.timestamp > 20 * 1000;
-        if (startedAt === null || gapExceeded) {
-          collectionStartedAtRef.current = point.timestamp;
-          setCollectionStartedAt(point.timestamp);
-          setClockNow(point.timestamp);
-          setFinalAnalysis(null);
-        }
-
-        const pointsBeforeSample = gapExceeded ? [] : current;
-        const latestPoint = pointsBeforeSample[pointsBeforeSample.length - 1];
-        const nextHistory = latestPoint
-          && point.timestamp - latestPoint.timestamp < PRICE_SAMPLE_INTERVAL_MS
-          ? pointsBeforeSample
-          : trimHistory([...pointsBeforeSample, point], point.timestamp);
-        historyRef.current = nextHistory;
-        setHistory(nextHistory);
+        collection.push(point);
       },
       onStatus: (status: MarketFeedStatus) => {
+        if (generation !== runGeneration.current || !collection.isRunning()) return;
         setMarketStatus(status);
-        if (status === 'RECONECTANDO' && !collectionClosedRef.current) {
-          cancelCollectionTimers();
-          historyRef.current = [];
-          collectionStartedAtRef.current = null;
-          setHistory([]);
-          setCollectionStartedAt(null);
-          setClockNow(0);
-          setCollectionComplete(false);
-          setFinalAnalysis(null);
+        if (status === 'RECONECTANDO') {
+          collection.reconnect();
+          setCaptureHistory([]);
           setCurrentPrice(null);
           setLastPriceAt(null);
         }
       },
-      onError: setMarketError,
+      onError: (message) => {
+        if (generation === runGeneration.current && collection.isRunning()) setMarketError(message);
+      },
     });
 
     if (Platform.OS !== 'web') await prepareNotifications();
-    if (collectionClosedRef.current) return;
+    if (generation !== runGeneration.current || !collection.isRunning()) return;
     if (!isNativeCaptureAvailable()) {
       captureStatusRef.current = 'DESATIVADA';
       setCaptureStatus('DESATIVADA');
@@ -366,7 +264,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
     setCaptureStatus('SOLICITANDO PERMISSÃO');
     try {
       const permission = await requestScreenCapturePermission();
-      if (collectionClosedRef.current) return;
+      if (generation !== runGeneration.current || !collection.isRunning()) return;
       if (!permission.granted) {
         captureStatusRef.current = permission.status;
         setCaptureStatus(permission.status);
@@ -374,7 +272,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       await startScreenCapture(region);
-      if (collectionClosedRef.current) {
+      if (generation !== runGeneration.current || !collection.isRunning()) {
         await stopScreenCapture();
         captureStatusRef.current = 'DESATIVADA';
         setCaptureStatus('DESATIVADA');
@@ -390,10 +288,9 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
   };
 
   const stopAnalysis = async () => {
-    cancelCollectionTimers();
-    collectionClosedRef.current = true;
-    collectionStartedAtRef.current = null;
-    historyRef.current = [];
+    runGeneration.current += 1;
+    collection.stop();
+    setIsRunning(false);
     marketConnection.current?.close();
     marketConnection.current = null;
     setMarketStatus('DESATIVADA');
@@ -401,8 +298,6 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
     setCaptureHistory([]);
     setCollectionStartedAt(null);
     setClockNow(0);
-    setCollectionComplete(false);
-    setFinalAnalysis(null);
     setCurrentPrice(null);
     setLastPriceAt(null);
     setLastSignal('AGUARDAR');
@@ -443,7 +338,9 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
     lastSignal,
     lastSignalAt,
     analysis,
-    collectionComplete,
+    cycleNumber,
+    completedCycle,
+    dismissCycleNotice: () => setCompletedCycle(null),
     error,
     setRegion,
     startAnalysis,
@@ -458,7 +355,8 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
     analysisStatus,
     captureHistory,
     captureStatus,
-    collectionComplete,
+    cycleNumber,
+    completedCycle,
     currentPrice,
     error,
     history,

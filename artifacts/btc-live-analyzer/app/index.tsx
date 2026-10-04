@@ -168,6 +168,37 @@ function AnalyzerScreen() {
           <StatusPill label={analyzer.analysisStatus} active={analyzer.marketStatus === 'CONECTADO'} tone="blue" />
         </View>
 
+        {analyzer.isRunning ? (
+          <Text testID="continuous-analysis-status" style={[styles.continuousStatus, { color: colors.accentForeground }]}>
+            ANÁLISE CONTÍNUA ATIVA · CICLO {analyzer.cycleNumber}
+          </Text>
+        ) : null}
+
+        {analyzer.completedCycle ? (
+          <View
+            testID="cycle-completion-notice"
+            accessibilityRole="alert"
+            accessibilityLiveRegion="polite"
+            style={[styles.cycleNotice, { backgroundColor: colors.secondary, borderColor: signalColor[analyzer.completedCycle.signal] }]}
+          >
+            <View style={styles.errorCopy}>
+              <Text style={[styles.sectionEyebrow, { color: colors.mutedForeground }]}>CICLO DE 5 MINUTOS CONCLUÍDO</Text>
+              <Text testID="completed-cycle-signal" style={[styles.cycleNoticeSignal, { color: signalColor[analyzer.completedCycle.signal] }]}>
+                {analyzer.completedCycle.signal}
+              </Text>
+              <Text style={[styles.heroReason, { color: colors.foreground }]}>
+                Tendência: {analyzer.completedCycle.direction} · Confirmação: {analyzer.completedCycle.confidence}%
+              </Text>
+              <Text style={[styles.heroReason, { color: colors.mutedForeground }]}>
+                {analyzer.isRunning ? 'Resultado no histórico. A análise contínua permanece ativa.' : 'Resultado no histórico. Coleta interrompida.'}
+              </Text>
+            </View>
+            <Pressable testID="dismiss-cycle-notice" accessibilityRole="button" accessibilityLabel="Fechar aviso do ciclo concluído" onPress={analyzer.dismissCycleNotice} hitSlop={10}>
+              <Feather name="x" size={18} color={colors.mutedForeground} />
+            </Pressable>
+          </View>
+        ) : null}
+
         {analyzer.error ? (
           <View style={[styles.errorBox, { backgroundColor: '#301e1c', borderColor: '#754039' }]}>
             <Feather name="info" size={17} color="#ee6f5c" />
@@ -184,10 +215,10 @@ function AnalyzerScreen() {
         <View testID="current-analysis" style={[styles.heroCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <View style={styles.heroTop}>
             <View>
-              <Text style={[styles.sectionEyebrow, { color: colors.mutedForeground }]}>ÚLTIMO SINAL</Text>
-              <Text style={[styles.signalHeadline, { color: signalColor[analyzer.lastSignal] }]}>{analyzer.lastSignal}</Text>
+              <Text style={[styles.sectionEyebrow, { color: colors.mutedForeground }]}>CICLO ATUAL</Text>
+              <Text style={[styles.signalHeadline, { color: signalColor[analyzer.analysis.signal] }]}>{analyzer.analysis.signal}</Text>
             </View>
-            <SignalBadge signal={analyzer.lastSignal} />
+            <SignalBadge signal={analyzer.analysis.signal} />
           </View>
           <Text style={[styles.heroReason, { color: colors.mutedForeground }]}>{analyzer.analysis.reason}</Text>
           <View style={[styles.heroDivider, { backgroundColor: colors.border }]} />
@@ -201,8 +232,8 @@ function AnalyzerScreen() {
               <Text style={[styles.metricValue, { color: colors.foreground }]}>{analyzer.analysis.confidence}%</Text>
             </View>
             <View style={styles.metric}>
-              <Text style={[styles.metricLabel, { color: colors.mutedForeground }]}>HISTÓRICO</Text>
-              <Text style={[styles.metricValue, { color: colors.foreground }]}>{formatHistoryProgress(analyzer.historyDurationMs)}</Text>
+              <Text style={[styles.metricLabel, { color: colors.mutedForeground }]}>CICLO {analyzer.cycleNumber}</Text>
+              <Text testID="cycle-progress" style={[styles.metricValue, { color: colors.foreground }]}>{formatHistoryProgress(analyzer.historyDurationMs)}</Text>
             </View>
           </View>
         </View>
@@ -218,7 +249,7 @@ function AnalyzerScreen() {
           >
             <Feather name="play" size={17} color={analyzer.isRunning ? colors.mutedForeground : colors.primaryForeground} />
             <Text style={[styles.primaryButtonText, { color: analyzer.isRunning ? colors.mutedForeground : colors.primaryForeground }]}>
-              {analyzer.collectionComplete ? 'NOVA ANÁLISE' : 'INICIAR ANÁLISE'}
+              {analyzer.isRunning ? 'ANALISANDO' : 'INICIAR ANÁLISE'}
             </Text>
           </Pressable>
           <Pressable
@@ -227,9 +258,9 @@ function AnalyzerScreen() {
             disabled={!analyzer.isRunning}
             style={({ pressed }) => [styles.secondaryButton, { borderColor: analyzer.isRunning ? colors.destructive : colors.border, opacity: pressed ? 0.7 : 1 }]}
           >
-            <Feather name={analyzer.collectionComplete ? 'check' : 'square'} size={15} color={analyzer.isRunning ? colors.destructive : colors.mutedForeground} />
+            <Feather name="square" size={15} color={analyzer.isRunning ? colors.destructive : colors.mutedForeground} />
             <Text style={[styles.secondaryButtonText, { color: analyzer.isRunning ? colors.destructive : colors.mutedForeground }]}>
-              {analyzer.collectionComplete ? 'CONCLUÍDA' : 'PARAR'}
+              PARAR
             </Text>
           </Pressable>
         </View>
@@ -310,6 +341,9 @@ const styles = StyleSheet.create({
   title: { fontSize: 31, fontFamily: 'Inter_700Bold', letterSpacing: -1.2, marginTop: 3 },
   headerIcon: { width: 44, height: 44, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
   statusRow: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
+  continuousStatus: { fontSize: 12, lineHeight: 18, fontFamily: 'Inter_700Bold' },
+  cycleNotice: { borderWidth: 1, borderRadius: 16, padding: 16, gap: 10, flexDirection: 'row', alignItems: 'flex-start' },
+  cycleNoticeSignal: { fontSize: 20, fontFamily: 'Inter_700Bold', marginVertical: 5 },
   statusPill: { borderRadius: 20, paddingHorizontal: 11, paddingVertical: 8, flexDirection: 'row', alignItems: 'center', gap: 7 },
   statusDot: { width: 6, height: 6, borderRadius: 3 },
   statusPillText: { fontSize: 10, fontFamily: 'Inter_700Bold', letterSpacing: 0.7 },
