@@ -17,6 +17,7 @@ import { DEFAULT_ANALYSIS_WINDOW_MS } from '@/lib/analysis';
 import type { ChartPoint } from '@/lib/analysis';
 import type { CaptureRegion } from '@/lib/screenCapture';
 import { AnalysisHistory } from '@/components/AnalysisHistory';
+import { AnalysisTestPanel } from '@/components/AnalysisTestPanel';
 
 const signalColor = {
   'POSSÍVEL COMPRA': '#55d6a6',
@@ -245,6 +246,8 @@ function AnalyzerScreen() {
         </Pressable>
 
         <AnalysisHistory records={analyzer.signalHistory} />
+
+        <AnalysisTestPanel />
 
         <View style={styles.disclaimer}>
           <Feather name="shield" size={14} color={colors.mutedForeground} />
