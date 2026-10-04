@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import Svg, { Circle, Line, Polyline } from 'react-native-svg';
 import {
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -171,6 +172,14 @@ function AnalyzerScreen() {
         {analyzer.isRunning ? (
           <Text testID="continuous-analysis-status" style={[styles.continuousStatus, { color: colors.accentForeground }]}>
             ANÁLISE CONTÍNUA ATIVA · CICLO {analyzer.cycleNumber}
+          </Text>
+        ) : null}
+
+        {Platform.OS === 'android' ? (
+          <Text testID="android-background-status" style={[styles.heroReason, { color: colors.mutedForeground }]}>
+            {analyzer.backgroundAvailable
+              ? 'Segundo plano Android: serviço nativo com notificação permanente. Sujeito aos limites de bateria e execução do sistema; Forçar parada encerra a análise.'
+              : 'Expo Go/build sem serviço: análise somente com o app aberto. Segundo plano exige um APK Android com o módulo nativo.'}
           </Text>
         ) : null}
 

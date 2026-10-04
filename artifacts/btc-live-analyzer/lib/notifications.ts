@@ -1,10 +1,17 @@
 import { Platform } from 'react-native';
 import type { Signal } from './analysis';
+import { cycleNotificationContent, requestNotificationPermission } from './notificationPolicy';
 
 export async function prepareNotifications(): Promise<boolean> {
   if (Platform.OS === 'web') return false;
   try {
     const Notifications = await import('expo-notifications');
+    if (Platform.OS === 'android') {
+      await Notifications.setNotificationChannelAsync('btc-analysis-results', {
+        name: 'Resultados dos ciclos BTC',
+        importance: Notifications.AndroidImportance.DEFAULT,
+      });
+    }
     Notifications.setNotificationHandler({
       handleNotification: async () => ({
         shouldShowBanner: true,
@@ -13,21 +20,22 @@ export async function prepareNotifications(): Promise<boolean> {
         shouldSetBadge: false,
       }),
     });
-    const permission = await Notifications.requestPermissionsAsync();
-    return permission.granted;
+    return requestNotificationPermission({
+      getPermissions: Notifications.getPermissionsAsync,
+      requestPermissions: Notifications.requestPermissionsAsync,
+    });
   } catch {
     return false;
   }
 }
 
-export async function notifySignal(signal: Signal, confidence: number): Promise<void> {
+export async function notifySignal(signal: Signal, confidence: number, trend?: 'ALTA' | 'BAIXA' | 'LATERAL'): Promise<void> {
   if (Platform.OS === 'web') return;
   try {
     const Notifications = await import('expo-notifications');
     await Notifications.scheduleNotificationAsync({
       content: {
-        title: `Novo sinal BTC: ${signal}`,
-        body: `Análise técnica local com ${confidence}% de confiança. Não é garantia de movimento.`,
+        ...cycleNotificationContent(signal, trend ?? 'não informada', confidence),
       },
       trigger: null,
     });

@@ -2,3 +2,4 @@
 - [Android build validation](android-build-validation.md) — Native autolinking validates in this workspace, but APK compilation needs a persistent Android SDK and a stable JDK.
 - [Expo preview dependency links](expo-preview-dependency-links.md) — If the mobile preview returns 502, check whether the artifact’s pnpm Expo link is stale before changing its workflow or Expo settings.
 - [BTC analyzer scope](btc-analyzer-scope.md) — Signals are informational only; preserve screen capture and Expo/EAS configuration.
+- [Android background limits](android-background-limits.md) — Respect dataSync limits; capture is not an exemption, and web/bundle checks do not prove native background execution.

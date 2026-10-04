@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { Platform } from 'react-native';
+import { Alert, Platform } from 'react-native';
 import {
   analyzeChart,
   DEFAULT_ANALYSIS_WINDOW_MS,
@@ -22,6 +22,8 @@ import { notifySignal, prepareNotifications } from '@/lib/notifications';
 import { createAnalysisHistoryStore, mergeAnalysisHistory } from '@/lib/analysisHistory';
 import type { AnalysisRecord } from '@/lib/analysisHistory';
 import { createContinuousCollection } from '@/lib/continuousCollection';
+import { getBackgroundAnalysisSnapshot, isBackgroundAnalysisAvailable, nativeBackgroundAnalysis, subscribeBackgroundAnalysis } from '@/lib/backgroundAnalysis';
+import type { AnalysisSessionSnapshot } from '@/lib/analysisSession';
 
 export type SignalRecord = AnalysisRecord;
 
@@ -47,6 +49,7 @@ type AnalyzerContextValue = {
   analysis: ReturnType<typeof analyzeChart>;
   cycleNumber: number;
   completedCycle: SignalRecord | null;
+  backgroundAvailable: boolean;
   dismissCycleNotice: () => void;
   error: string | null;
   setRegion: (region: CaptureRegion) => void;
@@ -83,6 +86,10 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
   const marketConnection = useRef<MarketFeedConnection | null>(null);
   const captureStatusRef = useRef<CaptureStatus>('DESATIVADA');
   const runGeneration = useRef(0);
+  const backgroundRunning = useRef(false);
+  const starting = useRef(false);
+  const dismissedCycle = useRef<number | null>(null);
+  const dismissedBackgroundError = useRef<string | null>(null);
   const collection = useMemo(() => createContinuousCollection({
     windowMs: DEFAULT_ANALYSIS_WINDOW_MS,
     onUpdate: (state) => {
@@ -112,11 +119,64 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
           setHistoryError(null);
         })
         .catch(() => setHistoryError('Análise mantida nesta sessão, mas não foi possível salvar o histórico no dispositivo.'));
-      if (result.signal !== 'AGUARDAR') {
-        void notifySignal(result.signal, result.confidence).catch(() => undefined);
-      }
+      void notifySignal(result.signal, result.confidence, result.trend).catch(() => undefined);
     },
   }), [historyStore]);
+
+  useEffect(() => {
+    const native = nativeBackgroundAnalysis;
+    if (!native) return;
+    let active = true;
+    let received = false;
+    function restore(state: AnalysisSessionSnapshot) {
+      if (!active) return;
+      backgroundRunning.current = state.isRunning;
+      setIsRunning(state.isRunning);
+      setMarketStatus(state.marketStatus);
+      setHistory(state.history);
+      setCollectionStartedAt(state.collectionStartedAt);
+      setClockNow(state.clockNow);
+      setCycleNumber(state.cycleNumber);
+      setCurrentPrice(state.currentPrice);
+      setLastPriceAt(state.lastPriceAt);
+      setCompletedCycle(state.completedCycle?.timestamp === dismissedCycle.current ? null : state.completedCycle);
+      setSignalHistory((current) => mergeAnalysisHistory(state.signalHistory, current));
+      if (!state.error) dismissedBackgroundError.current = null;
+      setMarketError(state.error === dismissedBackgroundError.current ? null : state.error);
+      if (state.completedCycle) {
+        setLastSignal(state.completedCycle.signal);
+        setLastSignalAt(state.completedCycle.timestamp);
+      }
+    }
+    const subscription = subscribeBackgroundAnalysis((state) => { received = true; restore(state); });
+    // Native startup may fail before Headless JS begins publishing. Likewise,
+    // a destroyed service must not leave a stale "running" UI behind.
+    const stopSubscription = native.addListener('onAnalysisStop', (payload) => {
+      void native.isActive().then(async (running) => {
+        if (!active || running) return;
+        runGeneration.current += 1;
+        backgroundRunning.current = false;
+        setIsRunning(false);
+        setMarketStatus('DESATIVADA');
+        setCurrentPrice(null);
+        setLastPriceAt(null);
+        if (payload.message && payload.message !== 'Análise interrompida pelo usuário.' && payload.message !== 'Serviço Android interrompido.') {
+          setMarketError(payload.message);
+        }
+        const state = await getBackgroundAnalysisSnapshot();
+        if (state && !state.isRunning) restore(state);
+        await stopScreenCapture();
+      }).catch(() => {
+        if (active) setMarketError('Não foi possível consultar a parada do serviço Android.');
+      });
+    });
+    void getBackgroundAnalysisSnapshot().then((state) => {
+      if (state && !received) restore(state);
+    }).catch(() => {
+      if (active) setMarketError('Não foi possível restaurar o estado do serviço Android.');
+    });
+    return () => { active = false; subscription.remove(); stopSubscription.remove(); };
+  }, []);
 
   useEffect(() => {
     AsyncStorage.getItem(REGION_KEY)
@@ -146,7 +206,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
       if (status === 'ATIVA') setCaptureError(null);
     });
     const frameSubscription = subscribeCaptureFrames((frame) => {
-      if (!collection.isRunning()) return;
+      if (!collection.isRunning() && !backgroundRunning.current) return;
       setCaptureHistory((current) => {
         const lastPoint = current[current.length - 1];
         if (lastPoint && frame.timestamp - lastPoint.timestamp < CAPTURE_FRAME_SAMPLE_INTERVAL_MS) {
@@ -210,11 +270,30 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
   };
 
   const startAnalysis = async () => {
-    if (collection.isRunning()) return;
+    if (collection.isRunning() || backgroundRunning.current || starting.current) return;
+    starting.current = true;
     const generation = ++runGeneration.current;
+    try {
+    if (nativeBackgroundAnalysis) {
+      if (await nativeBackgroundAnalysis.isActive()) return;
+      const permitted = await prepareNotifications();
+      if (!permitted) {
+        const proceed = await new Promise<boolean>((resolve) => Alert.alert(
+          'Notificações desativadas',
+          'O Android não autorizou as notificações. A coleta pode continuar, mas os avisos dos ciclos não aparecerão. Você pode permitir notificações nas configurações do aplicativo.',
+          [
+            { text: 'Cancelar', style: 'cancel', onPress: () => resolve(false) },
+            { text: 'Continuar sem avisos', onPress: () => resolve(true) },
+          ],
+          { cancelable: true, onDismiss: () => resolve(false) },
+        ));
+        if (!proceed || generation !== runGeneration.current) return;
+      }
+      if (generation !== runGeneration.current) return;
+    }
     marketConnection.current?.close();
     marketConnection.current = null;
-    collection.start();
+    if (!nativeBackgroundAnalysis) collection.start();
     setIsRunning(true);
     setCompletedCycle(null);
     setMarketError(null);
@@ -229,6 +308,10 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
     setLastSignalAt(null);
     setMarketStatus('CONECTANDO');
 
+    if (nativeBackgroundAnalysis) {
+      await nativeBackgroundAnalysis.start();
+      backgroundRunning.current = true;
+    } else {
     marketConnection.current = connectBtcUsdTicker({
       onPrice: (point: MarketPricePoint) => {
         if (generation !== runGeneration.current || !collection.isRunning()) return;
@@ -251,9 +334,10 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
         if (generation === runGeneration.current && collection.isRunning()) setMarketError(message);
       },
     });
+    }
 
-    if (Platform.OS !== 'web') await prepareNotifications();
-    if (generation !== runGeneration.current || !collection.isRunning()) return;
+    if (Platform.OS !== 'web' && !nativeBackgroundAnalysis) await prepareNotifications();
+    if (generation !== runGeneration.current || (!collection.isRunning() && !backgroundRunning.current)) return;
     if (!isNativeCaptureAvailable()) {
       captureStatusRef.current = 'DESATIVADA';
       setCaptureStatus('DESATIVADA');
@@ -264,7 +348,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
     setCaptureStatus('SOLICITANDO PERMISSÃO');
     try {
       const permission = await requestScreenCapturePermission();
-      if (generation !== runGeneration.current || !collection.isRunning()) return;
+      if (generation !== runGeneration.current || (!collection.isRunning() && !backgroundRunning.current)) return;
       if (!permission.granted) {
         captureStatusRef.current = permission.status;
         setCaptureStatus(permission.status);
@@ -272,7 +356,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       await startScreenCapture(region);
-      if (generation !== runGeneration.current || !collection.isRunning()) {
+      if (generation !== runGeneration.current || (!collection.isRunning() && !backgroundRunning.current)) {
         await stopScreenCapture();
         captureStatusRef.current = 'DESATIVADA';
         setCaptureStatus('DESATIVADA');
@@ -285,10 +369,23 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
       setCaptureStatus('ERRO');
       setCaptureError(message);
     }
+    } catch (startError) {
+      backgroundRunning.current = false;
+      collection.stop();
+      marketConnection.current?.close();
+      marketConnection.current = null;
+      setIsRunning(false);
+      setMarketStatus('DESATIVADA');
+      setMarketError(startError instanceof Error ? startError.message : 'Não foi possível iniciar a análise.');
+      if (nativeBackgroundAnalysis) await nativeBackgroundAnalysis.stop().catch(() => undefined);
+    } finally {
+      starting.current = false;
+    }
   };
 
   const stopAnalysis = async () => {
     runGeneration.current += 1;
+    backgroundRunning.current = false;
     collection.stop();
     setIsRunning(false);
     marketConnection.current?.close();
@@ -302,6 +399,15 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
     setLastPriceAt(null);
     setLastSignal('AGUARDAR');
     setLastSignalAt(null);
+    if (nativeBackgroundAnalysis) {
+      try { await nativeBackgroundAnalysis.stop(); }
+      catch {
+        const mayStillBeActive = await nativeBackgroundAnalysis.isActive().catch(() => true);
+        backgroundRunning.current = mayStillBeActive;
+        setIsRunning(mayStillBeActive);
+        setMarketError('Não foi possível confirmar a parada do serviço Android. Verifique a notificação permanente.');
+      }
+    }
     if (Platform.OS === 'web' || !isNativeCaptureAvailable()) {
       captureStatusRef.current = 'DESATIVADA';
       setCaptureStatus('DESATIVADA');
@@ -340,12 +446,17 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
     analysis,
     cycleNumber,
     completedCycle,
-    dismissCycleNotice: () => setCompletedCycle(null),
+    backgroundAvailable: isBackgroundAnalysisAvailable(),
+    dismissCycleNotice: () => {
+      dismissedCycle.current = completedCycle?.timestamp ?? null;
+      setCompletedCycle(null);
+    },
     error,
     setRegion,
     startAnalysis,
     stopAnalysis,
     clearError: () => {
+      dismissedBackgroundError.current = marketError;
       setMarketError(null);
       setCaptureError(null);
       setHistoryError(null);
