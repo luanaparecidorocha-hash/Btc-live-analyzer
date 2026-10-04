@@ -61,7 +61,7 @@ function getDirectionalSegments(
   windowMs: number,
   now: number,
 ): DirectionalSegments {
-  if (direction === 0 || points.length < 2) {
+  if (points.length < 2) {
     return { aligned: 0, opposed: 0, total: 0, consistency: 0, streak: 0 };
   }
 
@@ -80,7 +80,6 @@ function getDirectionalSegments(
   let aligned = 0;
   let opposed = 0;
   let streak = 0;
-  let countingStreak = true;
   let total = 0;
 
   for (let index = 0; index < segmentCount; index += 1) {
@@ -95,9 +94,9 @@ function getDirectionalSegments(
     total += 1;
     if (changePercent * direction >= MIN_BUCKET_MOVE_PERCENT) {
       aligned += 1;
-      if (countingStreak) streak += 1;
+      streak += 1;
     } else {
-      countingStreak = false;
+      streak = 0;
       if (changePercent * direction <= -MIN_BUCKET_MOVE_PERCENT) opposed += 1;
     }
   }
@@ -243,12 +242,20 @@ export function analyzeChart(
     };
   }
 
+  if (direction === 0) {
+    return {
+      signal: 'AGUARDAR',
+      ...resultBase,
+      reason: `Variação de ${Math.abs(priceChangePercent).toFixed(2)}% na janela de 5 minutos, sem direção clara. AGUARDAR.`,
+    };
+  }
+
   const consistencyLabel = `${segments.aligned}/${segments.total} períodos`;
   const countertrendLabel = `${segments.opposed}/${segments.total} contra`;
   const movementLabel = `${Math.abs(priceChangePercent).toFixed(2)}%`;
   const signalIssues: string[] = [];
 
-  if (direction === 0 || Math.abs(priceChangePercent) < MIN_SIGNAL_MOVE_PERCENT) {
+  if (Math.abs(priceChangePercent) < MIN_SIGNAL_MOVE_PERCENT) {
     signalIssues.push(`variação de ${movementLabel} abaixo do mínimo de ${MIN_SIGNAL_MOVE_PERCENT.toFixed(2)}%`);
   }
   if (
@@ -259,6 +266,9 @@ export function analyzeChart(
   }
   if (pathEfficiency < MIN_PATH_EFFICIENCY) {
     signalIssues.push(`trajetória irregular (${Math.round(pathEfficiency * 100)}% de eficiência)`);
+  }
+  if (segments.streak === 0) {
+    signalIssues.push('fim da janela não confirma a direção geral');
   }
   if (confidence < MIN_SIGNAL_CONFIDENCE) {
     signalIssues.push(`força agregada de ${confidence}% abaixo do mínimo de ${MIN_SIGNAL_CONFIDENCE}%`);

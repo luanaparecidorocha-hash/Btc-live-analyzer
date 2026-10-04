@@ -203,3 +203,21 @@ test('waits until the full five-minute window has elapsed', () => {
   assert.equal(result.signal, 'AGUARDAR');
   assert.match(result.reason, /antes de avaliar um sinal/);
 });
+
+test('waits on a flat market without mistaking it for insufficient data', () => {
+  const result = analyzeChart(makeLinearPoints(0), DEFAULT_ANALYSIS_WINDOW_MS, DEFAULT_ANALYSIS_WINDOW_MS);
+  assert.equal(result.signal, 'AGUARDAR');
+  assert.equal(result.trend, 'LATERAL');
+  assert.equal(result.confidence, 0);
+  assert.match(result.reason, /sem direção clara/);
+});
+
+test('waits when the end of the window reverses the overall direction', () => {
+  const result = analyzeChart(
+    makeSegmentedPoints([0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, -0.03, -0.03]),
+    DEFAULT_ANALYSIS_WINDOW_MS,
+    DEFAULT_ANALYSIS_WINDOW_MS,
+  );
+  assert.equal(result.signal, 'AGUARDAR');
+  assert.match(result.reason, /fim da janela não confirma/);
+});
