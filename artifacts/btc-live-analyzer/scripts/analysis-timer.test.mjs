@@ -167,8 +167,8 @@ test('waits when strong movement conflicts across the analysis window', () => {
   );
 
   assert.equal(result.signal, 'AGUARDAR');
+  assert.equal(result.trend, 'LATERAL');
   assert.match(result.reason, /tendência inconsistente/);
-  assert.match(result.reason, /5\/10 períodos na direção, 5\/10 contra/);
 });
 
 test('waits when a completed window has too few or stale samples', () => {
@@ -220,4 +220,19 @@ test('waits when the end of the window reverses the overall direction', () => {
   );
   assert.equal(result.signal, 'AGUARDAR');
   assert.match(result.reason, /fim da janela não confirma/);
+});
+
+test('a small but predominantly falling or rising five-minute window is directional, not lateral', () => {
+  for (const [move, trend] of [[-0.02, 'BAIXA'], [0.02, 'ALTA']]) {
+    const result = analyzeChart(makeLinearPoints(move), DEFAULT_ANALYSIS_WINDOW_MS, DEFAULT_ANALYSIS_WINDOW_MS);
+    assert.equal(result.trend, trend);
+    assert.equal(result.signal, 'AGUARDAR');
+    assert.match(result.reason, /abaixo do mínimo/);
+  }
+});
+
+test('a tiny drift below the noise floor remains lateral', () => {
+  const result = analyzeChart(makeLinearPoints(-0.002), DEFAULT_ANALYSIS_WINDOW_MS, DEFAULT_ANALYSIS_WINDOW_MS);
+  assert.equal(result.trend, 'LATERAL');
+  assert.equal(result.signal, 'AGUARDAR');
 });

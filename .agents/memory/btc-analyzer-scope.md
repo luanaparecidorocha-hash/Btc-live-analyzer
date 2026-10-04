@@ -9,6 +9,8 @@ An analysis run starts with its first live BTC/USD quote and ends exactly five m
 
 Signals must consider price direction/variation, movement strength, and trend consistency. Conflicting or insufficient evidence must yield AGUARDAR. Confirmation is signal strength, not a probability or guarantee of success.
 
+Trend describes predominant price direction independently of the stronger trade-signal thresholds: a sustained small decline can be BAIXA with AGUARDAR. Every completed analysis, including AGUARDAR, must remain in persistent history below the current analysis; new runs must never erase earlier results.
+
 **Why:** The user set the app's informational constraints and specified that the five-minute collection must be finalized once without auto-restarting.
 
 **How to apply:** Anchor the deadline to the first live quote, reject later samples, freeze the final analysis, and preserve the capture permission/region flow and Expo/EAS setup.

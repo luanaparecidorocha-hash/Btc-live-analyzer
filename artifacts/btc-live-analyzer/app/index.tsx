@@ -16,6 +16,7 @@ import { AnalyzerProvider, useAnalyzer } from '@/context/AnalyzerContext';
 import { DEFAULT_ANALYSIS_WINDOW_MS } from '@/lib/analysis';
 import type { ChartPoint } from '@/lib/analysis';
 import type { CaptureRegion } from '@/lib/screenCapture';
+import { AnalysisHistory } from '@/components/AnalysisHistory';
 
 const signalColor = {
   'POSSÍVEL COMPRA': '#55d6a6',
@@ -170,7 +171,7 @@ function AnalyzerScreen() {
           <View style={[styles.errorBox, { backgroundColor: '#301e1c', borderColor: '#754039' }]}>
             <Feather name="info" size={17} color="#ee6f5c" />
             <View style={styles.errorCopy}>
-              <Text style={styles.errorTitle}>Aviso da conexão ou captura</Text>
+              <Text style={styles.errorTitle}>Aviso do aplicativo</Text>
               <Text style={styles.errorText}>{analyzer.error}</Text>
             </View>
             <Pressable onPress={analyzer.clearError} hitSlop={10}>
@@ -179,7 +180,7 @@ function AnalyzerScreen() {
           </View>
         ) : null}
 
-        <View style={[styles.heroCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+        <View testID="current-analysis" style={[styles.heroCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <View style={styles.heroTop}>
             <View>
               <Text style={[styles.sectionEyebrow, { color: colors.mutedForeground }]}>ÚLTIMO SINAL</Text>
@@ -242,6 +243,8 @@ function AnalyzerScreen() {
           </View>
           <Feather name="chevron-right" size={19} color={colors.mutedForeground} />
         </Pressable>
+
+        <AnalysisHistory records={analyzer.signalHistory} />
 
         <View style={styles.disclaimer}>
           <Feather name="shield" size={14} color={colors.mutedForeground} />

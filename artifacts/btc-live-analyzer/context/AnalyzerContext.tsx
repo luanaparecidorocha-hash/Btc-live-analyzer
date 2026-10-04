@@ -21,14 +21,10 @@ import {
   subscribeCaptureState,
 } from '@/lib/screenCapture';
 import { notifySignal, prepareNotifications } from '@/lib/notifications';
+import { createAnalysisHistoryStore, mergeAnalysisHistory } from '@/lib/analysisHistory';
+import type { AnalysisRecord } from '@/lib/analysisHistory';
 
-export type SignalRecord = {
-  timestamp: number;
-  signal: Signal;
-  direction: 'ALTA' | 'BAIXA' | 'LATERAL';
-  confidence: number;
-  reason: string;
-};
+export type SignalRecord = AnalysisRecord;
 
 type CaptureHistoryPoint = {
   timestamp: number;
@@ -59,7 +55,6 @@ type AnalyzerContextValue = {
 };
 
 const REGION_KEY = '@btc-live-analyzer/region';
-const SIGNAL_KEY = '@btc-live-analyzer/signal-history';
 const defaultRegion: CaptureRegion = { left: 8, top: 24, width: 84, height: 48 };
 const PRICE_SAMPLE_INTERVAL_MS = 5 * 1000;
 const CAPTURE_FRAME_SAMPLE_INTERVAL_MS = 15 * 1000;
@@ -82,6 +77,8 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
   const [lastSignalAt, setLastSignalAt] = useState<number | null>(null);
   const [marketError, setMarketError] = useState<string | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const historyStore = useMemo(() => createAnalysisHistoryStore(AsyncStorage), []);
   const marketConnection = useRef<MarketFeedConnection | null>(null);
   const historyRef = useRef<ChartPoint[]>([]);
   const collectionStartedAtRef = useRef<number | null>(null);
@@ -92,13 +89,24 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
   const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    Promise.all([AsyncStorage.getItem(REGION_KEY), AsyncStorage.getItem(SIGNAL_KEY)])
-      .then(([storedRegion, storedSignals]) => {
+    AsyncStorage.getItem(REGION_KEY)
+      .then((storedRegion) => {
         if (storedRegion) setRegionState(JSON.parse(storedRegion) as CaptureRegion);
-        if (storedSignals) setSignalHistory(JSON.parse(storedSignals) as SignalRecord[]);
       })
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    historyStore.load()
+      .then((saved) => {
+        if (active) setSignalHistory((current) => mergeAnalysisHistory(saved, current));
+      })
+      .catch(() => {
+        if (active) setHistoryError('Não foi possível carregar o histórico salvo. Os dados antigos não serão sobrescritos.');
+      });
+    return () => { active = false; };
+  }, [historyStore]);
 
   useEffect(() => {
     const stateSubscription = subscribeCaptureState((status, message) => {
@@ -170,7 +178,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
           : marketStatus === 'CONECTADO'
             ? 'ANALISANDO'
             : 'AGUARDANDO DADOS';
-  const error = marketError ?? captureError;
+  const error = marketError ?? captureError ?? historyError;
   const cancelCollectionTimers = useCallback(() => {
     cancelDeadlineRef.current?.();
     cancelDeadlineRef.current = null;
@@ -195,6 +203,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
       signal: result.signal,
       direction: result.trend,
       confidence: result.confidence,
+      durationMs: DEFAULT_ANALYSIS_WINDOW_MS,
       reason: result.reason,
     };
 
@@ -203,11 +212,13 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
     setCollectionComplete(true);
     setLastSignal(result.signal);
     setLastSignalAt(completedAt);
-    setSignalHistory((current) => {
-      const next = [...current, record].slice(-100);
-      AsyncStorage.setItem(SIGNAL_KEY, JSON.stringify(next)).catch(() => undefined);
-      return next;
-    });
+    setSignalHistory((current) => mergeAnalysisHistory(current, [record]));
+    void historyStore.append(record)
+      .then((saved) => {
+        setSignalHistory((current) => mergeAnalysisHistory(saved, current));
+        setHistoryError(null);
+      })
+      .catch(() => setHistoryError('Análise mantida nesta sessão, mas não foi possível salvar o histórico no dispositivo.'));
 
     marketConnection.current?.close();
     marketConnection.current = null;
@@ -237,7 +248,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
           setCaptureError(message);
         });
     }
-  }, [cancelCollectionTimers]);
+  }, [cancelCollectionTimers, historyStore]);
   finishCollectionRef.current = finishCollection;
 
   useEffect(() => {
@@ -440,6 +451,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
     clearError: () => {
       setMarketError(null);
       setCaptureError(null);
+      setHistoryError(null);
     },
   }), [
     analysis,

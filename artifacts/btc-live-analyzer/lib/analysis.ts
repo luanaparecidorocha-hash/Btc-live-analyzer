@@ -23,7 +23,7 @@ const MAX_SAMPLE_GAP_MS = 20 * 1000;
 const BUCKET_DURATION_MS = 30 * 1000;
 const BUCKET_BOUNDARY_TOLERANCE_MS = 15 * 1000;
 const MIN_SIGNAL_MOVE_PERCENT = 0.12;
-const MIN_TREND_MOVE_PERCENT = 0.04;
+const MIN_TREND_MOVE_PERCENT = 0.005;
 const MIN_BUCKET_MOVE_PERCENT = 0.005;
 const MIN_PATH_EFFICIENCY = 0.55;
 const MIN_DIRECTIONAL_CONSISTENCY = 0.7;
@@ -60,6 +60,7 @@ function getDirectionalSegments(
   direction: -1 | 0 | 1,
   windowMs: number,
   now: number,
+  minimumMovePercent = MIN_BUCKET_MOVE_PERCENT,
 ): DirectionalSegments {
   if (points.length < 2) {
     return { aligned: 0, opposed: 0, total: 0, consistency: 0, streak: 0 };
@@ -92,12 +93,12 @@ function getDirectionalSegments(
 
     const changePercent = ((endPrice - startPrice) / startPrice) * 100;
     total += 1;
-    if (changePercent * direction >= MIN_BUCKET_MOVE_PERCENT) {
+    if (changePercent * direction >= minimumMovePercent) {
       aligned += 1;
       streak += 1;
     } else {
       streak = 0;
-      if (changePercent * direction <= -MIN_BUCKET_MOVE_PERCENT) opposed += 1;
+      if (changePercent * direction <= -minimumMovePercent) opposed += 1;
     }
   }
 
@@ -108,6 +109,44 @@ function getDirectionalSegments(
     consistency: total > 0 ? aligned / total : 0,
     streak,
   };
+}
+
+function classifyTrend(
+  points: ChartPoint[],
+  priceChangePercent: number,
+  windowMs: number,
+  now: number,
+): AnalysisResult['trend'] {
+  // Describing a trend is separate from authorizing a trading signal.
+  // Small, sustained moves can be directional without meeting signal thresholds.
+  if (points.length < 8 || Math.abs(priceChangePercent) < MIN_TREND_MOVE_PERCENT) return 'LATERAL';
+  const direction = priceChangePercent > 0 ? 1 : -1;
+  const segments = getDirectionalSegments(points, direction, windowMs, now, 0.0005);
+  const span = points[points.length - 1].timestamp - points[0].timestamp;
+  if (span <= 0 || segments.total < 2) return 'LATERAL';
+
+  const xs = points.map((point) => (point.timestamp - points[0].timestamp) / span);
+  const ys = points.map((point) => ((point.price - points[0].price) / points[0].price) * 100);
+  const meanX = xs.reduce((sum, x) => sum + x, 0) / xs.length;
+  const meanY = ys.reduce((sum, y) => sum + y, 0) / ys.length;
+  let covariance = 0;
+  let varianceX = 0;
+  let varianceY = 0;
+  for (let index = 0; index < xs.length; index += 1) {
+    const x = xs[index] - meanX;
+    const y = ys[index] - meanY;
+    covariance += x * y;
+    varianceX += x * x;
+    varianceY += y * y;
+  }
+  const fit = varianceX > 0 && varianceY > 0
+    ? (covariance * covariance) / (varianceX * varianceY)
+    : 0;
+  const consistent = covariance * direction > 0
+    && fit >= 0.5
+    && segments.consistency >= 0.6
+    && segments.opposed / segments.total <= 0.3;
+  return consistent ? (direction > 0 ? 'ALTA' : 'BAIXA') : 'LATERAL';
 }
 
 export function analyzeChart(
@@ -159,9 +198,9 @@ export function analyzeChart(
     const previousPrice = windowPoints[index].price;
     return previousPrice > 0 ? ((point.price - previousPrice) / previousPrice) * 100 : 0;
   });
-  const direction: -1 | 0 | 1 = priceChangePercent >= MIN_TREND_MOVE_PERCENT
+  const direction: -1 | 0 | 1 = priceChangePercent > 0
     ? 1
-    : priceChangePercent <= -MIN_TREND_MOVE_PERCENT
+    : priceChangePercent < 0
       ? -1
       : 0;
   const segments = getDirectionalSegments(windowPoints, direction, windowMs, now);
@@ -181,7 +220,7 @@ export function analyzeChart(
     + pathEfficiency * 0.3
     + segments.consistency * 0.3
   ) * 100;
-  const trend: AnalysisResult['trend'] = direction > 0 ? 'ALTA' : direction < 0 ? 'BAIXA' : 'LATERAL';
+  const trend = classifyTrend(windowPoints, priceChangePercent, windowMs, now);
   const fullWindowCollected = elapsed >= windowMs;
   const requiredSegmentCount = Math.max(1, Math.ceil(windowMs / BUCKET_DURATION_MS) - 1);
   const fullWindowDataQuality = Math.min(
@@ -242,11 +281,11 @@ export function analyzeChart(
     };
   }
 
-  if (direction === 0) {
+  if (trend === 'LATERAL') {
     return {
       signal: 'AGUARDAR',
       ...resultBase,
-      reason: `Variação de ${Math.abs(priceChangePercent).toFixed(2)}% na janela de 5 minutos, sem direção clara. AGUARDAR.`,
+      reason: `Variação de ${Math.abs(priceChangePercent).toFixed(2)}% na janela de 5 minutos; tendência inconsistente ou sem direção clara. AGUARDAR.`,
     };
   }
 
