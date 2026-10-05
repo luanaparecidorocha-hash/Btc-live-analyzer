@@ -26,3 +26,9 @@ When investigating recognition of an Expo authorization already granted in the b
 **Why:** The user repeatedly required preserving the existing authorization and isolating connection recovery from app changes.
 
 **How to apply:** Look for an existing connection that can be attached. If recovery is unavailable, distinguish observed connection state from an unverified callback or permission failure; do not substitute another OAuth flow.
+
+Binance is a second, public-market-data source for BTC/USDT, not a replacement for Kraken BTC/USD. Do not request API keys, passwords or account credentials for it. In the initial integration stage, collect observations independently for future comparison: no multiple-exchange screen and no changes to the existing signals, five-minute cycle or capture.
+
+**Why:** The user explicitly required an isolated first stage and preservation of everything already working. The quote currencies differ: BTC/USDT must not be treated as BTC/USD or silently fed into the current engine.
+
+**How to apply:** Keep Binance observations separate from Kraken-driven analysis. Only expand comparison, UI or signal use when explicitly requested, and keep the source and quote currency distinct.

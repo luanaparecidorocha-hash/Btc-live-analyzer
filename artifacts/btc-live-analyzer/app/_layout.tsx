@@ -14,6 +14,7 @@ import {
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { markStartupReady, recordStartupDiagnostic } from '@/lib/startupDiagnostics';
+import { binanceMarketFeed } from '@/lib/binanceMarketData';
 
 // Prevent the splash screen from auto-hiding before asset loading is complete.
 SplashScreen.preventAutoHideAsync();
@@ -30,6 +31,12 @@ function RootLayoutNav() {
 }
 
 export default function RootLayout() {
+  // Observation only; independent of AnalyzerContext, Kraken, capture and signals.
+  useEffect(() => {
+    binanceMarketFeed.start();
+    return () => binanceMarketFeed.stop();
+  }, []);
+
   const [fontsLoaded, fontError] = useFonts({
     Inter_400Regular,
     Inter_500Medium,
