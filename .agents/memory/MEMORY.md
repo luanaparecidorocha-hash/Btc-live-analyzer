@@ -5,3 +5,4 @@
 - [Android background limits](android-background-limits.md) — Respect dataSync limits; capture is not an exemption, and web/bundle checks do not prove native background execution.
 - [Expo MCP build directory](expo-mcp-build-directory.md) — Pass the monorepo base directory explicitly; a build request without it looked for eas.json at the repository root.
 - [EAS pnpm validation](eas-pnpm-validation.md) — Validate dependency-script approvals with the pnpm version in EAS logs, not only the workspace default.
+- [Android crash evidence](android-crash-evidence.md) — Device fatal stacks/exit reasons establish a crash cause; bridge defects and successful EAS builds do not.

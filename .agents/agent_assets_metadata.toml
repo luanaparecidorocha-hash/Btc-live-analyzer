@@ -1,0 +1,16 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "YCVYBMRiWQuBhvFgiao_J"
+uri = "file://diagnostics/btc-android/diagnostico-android.html"
+type = "html"
+title = "Diagnóstico Android — APK atual"
+description = "Resultados da investigação e coletor para download. Captura FATAL EXCEPTION, falhas nativas e motivo de encerramento sem gerar outro APK nem alterar o aplicativo."
+logical_id = "498357e3-0d23-49a4-a1b2-a98e00ab26a1"
+content_hash = "sha256:ddbe7fc1d2155265d7285affdbe666b290104c3b658b4d6396b37b255940e5d5"
+size = 16329
+mtime_ms = 1791194575616
+storage_uri = "gcs://replit-rams-assets-riker/rams/assets/repl:a70241ce-37e3-4496-a1c8-b03e97eef59f/498357e3-0d23-49a4-a1b2-a98e00ab26a1/7e7ed1eb-f11c-4739-84bc-d48f343c1a55"
+storage_version_token = "1791194606225485"
+content_type = "text/html"
