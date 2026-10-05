@@ -176,7 +176,7 @@ class ScreenCaptureService : Service() {
     val normalizedPosition = 1f - ((centerY - top) / max(1f, (bottom - top).toFloat()))
     eventSink?.invoke("onFrame", mapOf(
       "timestamp" to System.currentTimeMillis(),
-      "position" to normalizedPosition.coerceIn(0f, 1f),
+      "position" to normalizedPosition.coerceIn(0.0, 1.0),
       "meanLuma" to (lumaTotal.toFloat() / sampledPixels.toFloat()),
       "candidatePixels" to candidatePixels
     ))

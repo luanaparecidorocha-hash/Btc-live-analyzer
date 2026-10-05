@@ -62,7 +62,7 @@ class BtcScreenCaptureModule : Module() {
     }
 
     AsyncFunction("stop") {
-      val context = appContext.reactContext ?: return@AsyncFunction
+      val context = appContext.reactContext ?: return@AsyncFunction null
       context.stopService(Intent(context, ScreenCaptureService::class.java))
     }
 
