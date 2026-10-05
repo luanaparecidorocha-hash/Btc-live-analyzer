@@ -5,6 +5,7 @@ import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.core.app.NotificationManagerCompat
 import expo.modules.kotlin.modules.Module
@@ -28,11 +29,14 @@ class BtcBackgroundAnalysisModule : Module() {
         else context.startService(intent)
       } catch (error: Exception) {
         BtcAnalysisService.active = false
+        Log.e("BtcBackgroundAnalysis", "Falha ao solicitar o início do serviço Android.", error)
         throw error
       }
+      null
     }
     AsyncFunction("stop") {
       appContext.reactContext?.let { BtcAnalysisService.requestStop(it) }
+      null
     }
     AsyncFunction("isActive") { BtcAnalysisService.active }
     AsyncFunction("getSnapshot") {
@@ -45,12 +49,13 @@ class BtcBackgroundAnalysisModule : Module() {
         state.toString()
       }
     }
-    AsyncFunction("publishSnapshot") { json: String, token: Double ->
+    AsyncFunction<Any?, String, Double>("publishSnapshot") { json: String, token: Double ->
       BtcAnalysisService.publishSnapshot(json, token.toLong())
+      null
     }
-    AsyncFunction("notifyCycle") { title: String, body: String, token: Double ->
+    AsyncFunction<Any?, String, String, Double>("notifyCycle") { title: String, body: String, token: Double ->
       val context = appContext.reactContext ?: throw IllegalStateException("Contexto Android indisponível.")
-      if (!BtcAnalysisService.active || token.toLong() != BtcAnalysisService.runToken) return@AsyncFunction
+      if (!BtcAnalysisService.active || token.toLong() != BtcAnalysisService.runToken) return@AsyncFunction null
       if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
         throw IllegalStateException("Permissão de notificações não concedida.")
       }
@@ -62,6 +67,7 @@ class BtcBackgroundAnalysisModule : Module() {
         }
       }
       BtcAnalysisService.notifyCycle(context, title, body, token.toLong())
+      null
     }
     OnDestroy { BtcAnalysisService.eventSink = null }
   }

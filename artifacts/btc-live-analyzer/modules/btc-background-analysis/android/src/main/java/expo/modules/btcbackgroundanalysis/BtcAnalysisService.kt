@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.facebook.react.HeadlessJsTaskService
 import com.facebook.react.bridge.Arguments
@@ -18,17 +19,17 @@ class BtcAnalysisService : HeadlessJsTaskService() {
   private var ownerToken = 0L
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    if (intent?.action == ACTION_STOP) {
-      requestStop(this)
-      return START_NOT_STICKY
-    }
-    if (taskStarted) return START_NOT_STICKY
-    if (!active) {
-      stopSelf()
-      return START_NOT_STICKY
-    }
-    ownerToken = runToken
     try {
+      if (intent?.action == ACTION_STOP) {
+        requestStop(this)
+        return START_NOT_STICKY
+      }
+      if (taskStarted) return START_NOT_STICKY
+      if (!active) {
+        stopSelf()
+        return START_NOT_STICKY
+      }
+      ownerToken = runToken
       createChannels(this)
       val stopIntent = Intent(this, BtcAnalysisService::class.java).setAction(ACTION_STOP)
       val stop = PendingIntent.getService(this, 2, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -51,7 +52,19 @@ class BtcAnalysisService : HeadlessJsTaskService() {
       // Headless JS task is alive, including while the Activity is backgrounded.
       super.onStartCommand(intent, flags, startId)
     } catch (error: Exception) {
-      requestStop(this, "Não foi possível iniciar o serviço Android: ${error.message}")
+      Log.e("BtcAnalysisService", "Falha na inicialização do serviço foreground/Headless JS.", error)
+      active = false
+      try {
+        requestStop(this, "Não foi possível iniciar o serviço Android: ${error.message}")
+      } catch (cleanupError: Exception) {
+        Log.e("BtcAnalysisService", "Falha ao comunicar/limpar a interrupção do serviço.", cleanupError)
+      } finally {
+        try {
+          stopSelf()
+        } catch (stopError: Exception) {
+          Log.e("BtcAnalysisService", "Falha ao encerrar o serviço Android.", stopError)
+        }
+      }
     }
     // Do not silently restart after OS termination or user force-stop.
     return START_NOT_STICKY
@@ -69,8 +82,17 @@ class BtcAnalysisService : HeadlessJsTaskService() {
   }
 
   override fun onDestroy() {
-    endService(this, ownerToken)
-    super.onDestroy()
+    try {
+      endService(this, ownerToken)
+    } catch (error: Exception) {
+      Log.e("BtcAnalysisService", "Falha ao publicar o encerramento do serviço.", error)
+    } finally {
+      try {
+        super.onDestroy()
+      } catch (error: Exception) {
+        Log.e("BtcAnalysisService", "Falha ao liberar os recursos Headless JS.", error)
+      }
+    }
   }
 
   companion object {
