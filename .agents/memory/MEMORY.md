@@ -6,3 +6,4 @@
 - [Expo MCP build directory](expo-mcp-build-directory.md) — Pass the monorepo base directory explicitly; a build request without it looked for eas.json at the repository root.
 - [EAS pnpm validation](eas-pnpm-validation.md) — Validate dependency-script approvals with the pnpm version in EAS logs, not only the workspace default.
 - [Android crash evidence](android-crash-evidence.md) — Device fatal stacks/exit reasons establish a crash cause; bridge defects and successful EAS builds do not.
+- [GitHub build sync](github-build-sync.md) — Git push auth can fail while the connector works; verify exact remote source before EAS builds.
