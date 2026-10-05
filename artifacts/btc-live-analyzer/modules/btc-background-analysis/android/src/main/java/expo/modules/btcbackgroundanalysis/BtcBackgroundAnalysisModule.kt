@@ -21,7 +21,7 @@ class BtcBackgroundAnalysisModule : Module() {
     AsyncFunction("start") {
       val context = appContext.reactContext ?: throw IllegalStateException("Contexto Android indisponível.")
       if (appContext.currentActivity == null) throw IllegalStateException("Inicie a análise com o aplicativo aberto.")
-      if (!BtcAnalysisService.claimStart()) return@AsyncFunction
+      if (!BtcAnalysisService.claimStart()) return@AsyncFunction null
       try {
         val intent = Intent(context, BtcAnalysisService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
