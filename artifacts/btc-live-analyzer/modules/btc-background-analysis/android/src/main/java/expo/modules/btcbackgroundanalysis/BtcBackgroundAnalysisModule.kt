@@ -15,9 +15,20 @@ import org.json.JSONObject
 class BtcBackgroundAnalysisModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("BtcBackgroundAnalysis")
+    BtcCrashDiagnostics.record("native.background.module.definition")
     Events("onAnalysisState", "onAnalysisStop")
     OnCreate {
+      BtcCrashDiagnostics.record("native.background.module.onCreate")
       BtcAnalysisService.eventSink = { event, payload -> sendEvent(event, payload) }
+    }
+    Function<Any?, String, String>("recordDiagnostic") { stage: String, detail: String ->
+      if (stage == "JS_FATAL" || stage == "REACT_RENDER_ERROR") BtcCrashDiagnostics.failureText(stage, detail)
+      else BtcCrashDiagnostics.record(stage, detail)
+      null
+    }
+    Function<Any?>("markStartupReady") {
+      BtcCrashDiagnostics.ready()
+      null
     }
     AsyncFunction("start") {
       val context = appContext.reactContext ?: throw IllegalStateException("Contexto Android indisponível.")

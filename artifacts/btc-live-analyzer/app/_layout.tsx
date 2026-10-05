@@ -13,6 +13,7 @@ import {
 } from '@expo-google-fonts/inter';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
+import { markStartupReady, recordStartupDiagnostic } from '@/lib/startupDiagnostics';
 
 // Prevent the splash screen from auto-hiding before asset loading is complete.
 SplashScreen.preventAutoHideAsync();
@@ -38,6 +39,8 @@ export default function RootLayout() {
 
   useEffect(() => {
     if (fontsLoaded || fontError) {
+      if (fontError) recordStartupDiagnostic('js.font.error', fontError.stack || fontError.message);
+      markStartupReady();
       SplashScreen.hideAsync();
     }
   }, [fontsLoaded, fontError]);
@@ -46,7 +49,7 @@ export default function RootLayout() {
 
   return (
     <SafeAreaProvider>
-      <ErrorBoundary>
+      <ErrorBoundary onError={(error, stack) => recordStartupDiagnostic('REACT_RENDER_ERROR', `${error.stack || error.message}\n${stack}`)}>
         <QueryClientProvider client={queryClient}>
           <GestureHandlerRootView>
             <KeyboardProvider>
