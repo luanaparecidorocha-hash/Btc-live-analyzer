@@ -2,6 +2,7 @@ import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { useColors } from '@/hooks/useColors';
 import type { AnalysisRecord } from '@/lib/analysisHistory';
+import { CrossConfirmationDetails } from '@/components/CrossConfirmationDetails';
 
 function formatDuration(durationMs: number | null) {
   if (durationMs === null) return 'Não registrada';
@@ -41,6 +42,7 @@ export function AnalysisHistory({ records }: { records: AnalysisRecord[] }) {
               <Text style={[styles.metric, { color: colors.foreground }]}>Duração: {formatDuration(record.durationMs)}</Text>
             </View>
             <Text style={[styles.reason, { color: colors.mutedForeground }]}>{record.reason}</Text>
+            <CrossConfirmationDetails comparison={record.crossConfirmation} />
           </View>
         );
       })}

@@ -1,4 +1,4 @@
-// Independent observation feed. Never pass these USDT quotes to the BTC/USD signal engine.
+// Independent observation feed. Keep USDT prices separate from the Kraken USD series.
 export const BINANCE_BTC_USDT_URL = 'wss://data-stream.binance.vision/ws/btcusdt@miniTicker';
 
 export type BinanceQuote = Readonly<{
@@ -20,7 +20,8 @@ export type BinanceFeedSnapshot = Readonly<{
 
 const RETRY_DELAYS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
 const NO_DATA_TIMEOUT_MS = 45_000;
-const HISTORY_LIMIT = 300;
+// Two windows retain real start-boundary coverage despite 1s ticker/receipt jitter.
+const HISTORY_LIMIT = 660;
 
 export function parseBinanceMiniTicker(payload: string, receivedAt = Date.now()): BinanceQuote | null {
   let data: unknown;
@@ -40,7 +41,7 @@ export function parseBinanceMiniTicker(payload: string, receivedAt = Date.now())
 }
 
 /**
- * In-memory only: last quote, explicit connection/error state, and up to 300 recent
+ * In-memory only: last quote, explicit connection/error state, and up to 660 recent
  * updates for future comparisons. miniTicker publishes the last price every ~1s;
  * it is NOT a candle, a USD quote, or a five-minute analysis window.
  */
@@ -146,3 +147,16 @@ export function createBinanceMarketFeed() {
 }
 
 export const binanceMarketFeed = createBinanceMarketFeed();
+
+let owners = 0;
+/** Share one public connection between the UI and the Android headless owner. */
+export function acquireBinanceMarketFeed() {
+  owners += 1;
+  if (owners === 1) binanceMarketFeed.start();
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (--owners === 0) binanceMarketFeed.stop();
+  };
+}

@@ -1,4 +1,5 @@
 import type { Signal } from './analysis';
+import type { CrossConfirmation } from './crossConfirmation';
 
 export type AnalysisRecord = {
   timestamp: number;
@@ -7,6 +8,8 @@ export type AnalysisRecord = {
   confidence: number;
   durationMs: number | null;
   reason: string;
+  // Optional for backward compatibility: older results were Kraken-only.
+  crossConfirmation?: CrossConfirmation;
 };
 
 export const ANALYSIS_HISTORY_KEY = '@btc-live-analyzer/signal-history';
@@ -34,6 +37,25 @@ export function decodeAnalysisHistory(raw: string | null): AnalysisRecord[] {
       || (entry.durationMs !== undefined && entry.durationMs !== null
         && (typeof entry.durationMs !== 'number' || !Number.isFinite(entry.durationMs) || entry.durationMs < 0))
     ) throw new Error('Análise salva inválida.');
+    if (entry.crossConfirmation !== undefined) {
+      const cross = entry.crossConfirmation as Record<string, unknown> | null;
+      const directions = ['ALTA', 'BAIXA', 'LATERAL', 'INSUFICIENTE'];
+      const signals = ['POSSÍVEL COMPRA', 'POSSÍVEL VENDA', 'AGUARDAR'];
+      if (!cross || typeof cross !== 'object' || Array.isArray(cross)
+        || !directions.includes(String(cross.krakenDirection))
+        || !directions.includes(String(cross.binanceDirection))
+        || !['CONCORDANCIA', 'CONFLITO', 'NEUTRO', 'DADOS_INSUFICIENTES'].includes(String(cross.agreement))
+        || !['ALTA_CONFIRMADA', 'BAIXA_CONFIRMADA', 'SEM_CONFIRMACAO'].includes(String(cross.finalConfirmation))
+        || !signals.includes(String(cross.krakenSignal)) || !signals.includes(String(cross.binanceSignal))
+        || cross.finalSignal !== entry.signal || cross.finalConfidence !== entry.confidence
+        || ['finalConfidence', 'krakenConfidence', 'binanceConfidence', 'confidenceBonus'].some((key) => (
+          typeof cross[key] !== 'number' || !Number.isFinite(cross[key]) || cross[key] < 0 || cross[key] > 100
+        ))
+        || typeof cross.windowStart !== 'number' || !Number.isFinite(cross.windowStart)
+        || typeof cross.windowEnd !== 'number' || !Number.isFinite(cross.windowEnd)
+        || cross.windowEnd <= cross.windowStart
+      ) throw new Error('Confirmação cruzada salva inválida.');
+    }
     return {
       timestamp: entry.timestamp as number,
       signal: entry.signal as Signal,
@@ -41,6 +63,9 @@ export function decodeAnalysisHistory(raw: string | null): AnalysisRecord[] {
       confidence: entry.confidence,
       durationMs: entry.durationMs as number | null | undefined ?? null,
       reason: entry.reason,
+      ...(entry.crossConfirmation === undefined ? {} : {
+        crossConfirmation: entry.crossConfirmation as CrossConfirmation,
+      }),
     };
   });
 }

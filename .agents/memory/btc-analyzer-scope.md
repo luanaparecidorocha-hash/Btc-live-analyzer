@@ -27,8 +27,8 @@ When investigating recognition of an Expo authorization already granted in the b
 
 **How to apply:** Look for an existing connection that can be attached. If recovery is unavailable, distinguish observed connection state from an unverified callback or permission failure; do not substitute another OAuth flow.
 
-Binance is a second, public-market-data source for BTC/USDT, not a replacement for Kraken BTC/USD. Do not request API keys, passwords or account credentials for it. In the initial integration stage, collect observations independently for future comparison: no multiple-exchange screen and no changes to the existing signals, five-minute cycle or capture.
+Binance is a second, public-market-data source for BTC/USDT, not a replacement for Kraken BTC/USD. Do not request API keys, passwords or account credentials for it. Cross-source direction confirmation is now authorized, but not a multiple-exchange/add-exchange screen.
 
-**Why:** The user explicitly required an isolated first stage and preservation of everything already working. The quote currencies differ: BTC/USDT must not be treated as BTC/USD or silently fed into the current engine.
+**Why:** The user first required an isolated observation feed, then explicitly authorized direction corroboration while preserving the current algorithm, minimum criteria, five-minute cycle and capture. The quote currencies differ: BTC/USDT must not be treated as BTC/USD.
 
-**How to apply:** Keep Binance observations separate from Kraken-driven analysis. Only expand comparison, UI or signal use when explicitly requested, and keep the source and quote currency distinct.
+**How to apply:** Run the same existing engine independently over aligned real five-minute observations, using each source's relative movement rather than comparing absolute USD/USDT prices. Conflict, insufficient coverage or unmet original criteria in either source must yield AGUARDAR. Only an already-eligible concordant signal gets an additional 10 strength points, capped at 100; this is not probability or a guarantee. Register both directions, agreement/conflict, final confirmation and final signal, and preserve old Kraken-only history without inventing Binance evidence.

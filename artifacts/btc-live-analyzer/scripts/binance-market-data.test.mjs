@@ -41,11 +41,11 @@ test('isolated lifecycle, real-data readiness, bounded storage, retries and clea
   assert.equal(feed.getSnapshot().status, 'CONECTANDO');
   sockets[0].emit(ticker({ s: 'ETHUSDT' }));
   assert.equal(feed.getSnapshot().latest, null);
-  for (let i = 0; i < 310; i++) sockets[0].emit(ticker({ E: 1700000000000 + i }));
+  for (let i = 0; i < 670; i++) sockets[0].emit(ticker({ E: 1700000000000 + i }));
   const filled = feed.getSnapshot();
   assert.equal(filled.status, 'CONECTADO');
-  assert.equal(filled.receivedCount, 310);
-  assert.equal(filled.recentQuotes.length, 300);
+  assert.equal(filled.receivedCount, 670);
+  assert.equal(filled.recentQuotes.length, 660);
   assert.ok(Object.isFrozen(filled.recentQuotes));
   sockets[0].emit(ticker()); // Old event.
   assert.equal(feed.getSnapshot(), filled);
@@ -56,9 +56,9 @@ test('isolated lifecycle, real-data readiness, bounded storage, retries and clea
   assert.equal(feed.getSnapshot().latest, filled.latest); // Last known, not connected/live.
   t.mock.timers.tick(1000);
   assert.equal(sockets.length, 2);
-  lateHandler({ data: ticker({ E: 1700000000500 }) });
-  assert.equal(feed.getSnapshot().receivedCount, 310);
-  sockets[1].emit(ticker({ E: 1700000000600 }));
+  lateHandler({ data: ticker({ E: 1700000000900 }) });
+  assert.equal(feed.getSnapshot().receivedCount, 670);
+  sockets[1].emit(ticker({ E: 1700000001000 }));
   assert.equal(feed.getSnapshot().status, 'CONECTADO');
   assert.equal(feed.getSnapshot().error, null);
   t.mock.timers.tick(45000);

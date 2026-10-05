@@ -1,4 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { binanceMarketFeed } from '@/lib/binanceMarketData';
+import { createCrossConfirmedAnalyzer } from '@/lib/crossConfirmation';
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Platform } from 'react-native';
 import {
@@ -26,6 +28,7 @@ import { getBackgroundAnalysisSnapshot, isBackgroundAnalysisAvailable, nativeBac
 import type { AnalysisSessionSnapshot } from '@/lib/analysisSession';
 
 export type SignalRecord = AnalysisRecord;
+const analyzeCrossConfirmed = createCrossConfirmedAnalyzer(analyzeChart, binanceMarketFeed.getSnapshot);
 
 type CaptureHistoryPoint = {
   timestamp: number;
@@ -99,7 +102,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
       setHistory(state.points);
     },
     onComplete: (points, completedAt) => {
-      const result = analyzeChart([...points], DEFAULT_ANALYSIS_WINDOW_MS, completedAt);
+      const result = analyzeCrossConfirmed([...points], DEFAULT_ANALYSIS_WINDOW_MS, completedAt);
       const record: SignalRecord = {
         timestamp: completedAt,
         signal: result.signal,
@@ -107,6 +110,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
         confidence: result.confidence,
         durationMs: DEFAULT_ANALYSIS_WINDOW_MS,
         reason: result.reason,
+        crossConfirmation: result.crossConfirmation,
       };
       setLastSignal(result.signal);
       setLastSignalAt(completedAt);

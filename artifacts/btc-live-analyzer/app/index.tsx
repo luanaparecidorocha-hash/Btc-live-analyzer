@@ -14,6 +14,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors } from '@/hooks/useColors';
 import { AnalyzerProvider, useAnalyzer } from '@/context/AnalyzerContext';
+import { CrossConfirmationDetails } from '@/components/CrossConfirmationDetails';
 import { DEFAULT_ANALYSIS_WINDOW_MS } from '@/lib/analysis';
 import type { ChartPoint } from '@/lib/analysis';
 import type { CaptureRegion } from '@/lib/screenCapture';
@@ -198,6 +199,7 @@ function AnalyzerScreen() {
               <Text style={[styles.heroReason, { color: colors.foreground }]}>
                 Tendência: {analyzer.completedCycle.direction} · Confirmação: {analyzer.completedCycle.confidence}%
               </Text>
+              <CrossConfirmationDetails comparison={analyzer.completedCycle.crossConfirmation} />
               <Text style={[styles.heroReason, { color: colors.mutedForeground }]}>
                 {analyzer.isRunning ? 'Resultado no histórico. A análise contínua permanece ativa.' : 'Resultado no histórico. Coleta interrompida.'}
               </Text>

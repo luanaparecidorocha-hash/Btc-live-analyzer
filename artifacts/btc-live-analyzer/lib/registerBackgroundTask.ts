@@ -8,10 +8,13 @@ import { createAnalysisSession } from './analysisSession';
 import { nativeBackgroundAnalysis } from './backgroundAnalysis';
 import { stopScreenCapture } from './screenCapture';
 import { cycleNotificationContent } from './notificationPolicy';
+import { acquireBinanceMarketFeed, binanceMarketFeed } from './binanceMarketData';
+import { createCrossConfirmedAnalyzer } from './crossConfirmation';
 
 let currentTask: Promise<void> | null = null;
 let taskStopping = false;
 const androidHistoryStore = createAnalysisHistoryStore(AsyncStorage);
+const analyzeCrossConfirmed = createCrossConfirmedAnalyzer(analyzeChart, binanceMarketFeed.getSnapshot);
 
 async function runBackgroundAnalysis(runToken: number) {
   const native = nativeBackgroundAnalysis;
@@ -22,7 +25,7 @@ async function runBackgroundAnalysis(runToken: number) {
   const finished = new Promise<void>((resolve) => { resolveFinished = resolve; });
   const session = createAnalysisSession({
     windowMs: DEFAULT_ANALYSIS_WINDOW_MS,
-    analyze: analyzeChart,
+    analyze: analyzeCrossConfirmed,
     createCollection: createContinuousCollection,
     connect: connectBtcUsdTicker,
     store: androidHistoryStore,
@@ -50,8 +53,10 @@ async function runBackgroundAnalysis(runToken: number) {
   const stopSubscription = native.addListener('onAnalysisStop', (payload) => {
     if (payload.runToken === runToken) finish(payload.message);
   });
+  let releaseBinance: (() => void) | null = null;
   try {
     if (!await native.isActive() || stopped) return;
+    releaseBinance = acquireBinanceMarketFeed();
     await session.start();
     if (stopped) return;
     await finished; // zero native timeout: task stays alive until STOP/OS limit.
@@ -62,6 +67,7 @@ async function runBackgroundAnalysis(runToken: number) {
   } finally {
     stopSubscription.remove();
     session.stop();
+    releaseBinance?.();
   }
 }
 

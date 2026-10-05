@@ -70,6 +70,7 @@ export function createAnalysisSession(dependencies: SessionDependencies) {
       const record: AnalysisRecord = {
         timestamp: completedAt, signal: result.signal, direction: result.trend,
         confidence: result.confidence, durationMs: dependencies.windowMs, reason: result.reason,
+        ...(result.crossConfirmation ? { crossConfirmation: result.crossConfirmation } : {}),
       };
       state = { ...state, completedCycle: record, signalHistory: [...state.signalHistory, record] };
       publish();

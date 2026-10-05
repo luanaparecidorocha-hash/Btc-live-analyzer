@@ -1,3 +1,5 @@
+import type { CrossConfirmation } from './crossConfirmation';
+
 export type Signal = 'POSSÍVEL COMPRA' | 'POSSÍVEL VENDA' | 'AGUARDAR';
 
 export type ChartPoint = {
@@ -12,6 +14,9 @@ export type AnalysisResult = {
   streak: number;
   slope: number;
   reason: string;
+  // Metadata only: all existing movement, coverage and signal thresholds are unchanged.
+  dataStatus?: 'INSUFICIENTES' | 'COLETANDO' | 'SUFICIENTES';
+  crossConfirmation?: CrossConfirmation;
 };
 
 export const DEFAULT_ANALYSIS_WINDOW_MS = 5 * 60 * 1000;
@@ -172,6 +177,7 @@ export function analyzeChart(
       streak: 0,
       slope: 0,
       reason: 'Aguardando a primeira cotação real de BTC/USD.',
+      dataStatus: 'INSUFICIENTES',
     };
   }
 
@@ -187,6 +193,7 @@ export function analyzeChart(
       streak: 0,
       slope: 0,
       reason: 'Sem cotações recentes suficientes para avaliar a janela de 5 minutos.',
+      dataStatus: 'INSUFICIENTES',
     };
   }
 
@@ -234,6 +241,7 @@ export function analyzeChart(
   );
   const confidence = Math.round(rawConfidence * (fullWindowCollected ? fullWindowDataQuality : 1));
   const resultBase = {
+    dataStatus: 'SUFICIENTES' as const,
     trend,
     confidence,
     streak: segments.streak,
@@ -249,6 +257,7 @@ export function analyzeChart(
       signal: 'AGUARDAR',
       ...resultBase,
       reason: `Coletando preços reais: ${collected} de ${Math.ceil(windowMs / 60000)}:00 antes de avaliar um sinal.`,
+      dataStatus: 'COLETANDO',
     };
   }
 
@@ -278,6 +287,7 @@ export function analyzeChart(
       signal: 'AGUARDAR',
       ...resultBase,
       reason: `Dados insuficientes na janela de 5 minutos (${dataIssues.join('; ')}).`,
+      dataStatus: 'INSUFICIENTES',
     };
   }
 
