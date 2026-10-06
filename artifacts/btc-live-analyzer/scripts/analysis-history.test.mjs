@@ -48,13 +48,63 @@ test('hydration and concurrent completions merge rather than overwrite history',
   assert.deepEqual(mergeAnalysisHistory(loaded, second), second);
 });
 
-test('history is not truncated after one hundred completed analyses', async () => {
+test('history always retains only the ten newest completed analyses, including after reload', async () => {
   const storage = memoryStorage();
   const store = createAnalysisHistoryStore(storage);
   for (let index = 0; index < 105; index += 1) await store.append(record(index));
-  const results = await createAnalysisHistoryStore(storage).load();
-  assert.equal(results.length, 105);
-  assert.equal(results[0].timestamp, 0);
+  const results = await createAnalysisHistoryStore({ getItem: storage.getItem, setItem: storage.setItem }).load();
+  assert.equal(results.length, 10);
+  assert.deepEqual(results.map((item) => item.timestamp), Array.from({ length: 10 }, (_, i) => i + 95));
+  assert.equal(JSON.parse(storage.values.get(ANALYSIS_HISTORY_KEY)).length, 10);
+});
+
+test('the eleventh completion removes only the oldest, even with out-of-order input', async () => {
+  const storage = memoryStorage();
+  const store = createAnalysisHistoryStore(storage);
+  for (let i = 1; i <= 10; i++) await store.append(record(i));
+  assert.deepEqual(await store.append(record(11)), Array.from({ length: 10 }, (_, i) => record(i + 2)));
+  assert.deepEqual(await store.append(record(0)), Array.from({ length: 10 }, (_, i) => record(i + 2)));
+});
+
+test('loading legacy histories larger than ten keeps and persists the ten newest without changing data', async () => {
+  const storage = memoryStorage();
+  const saved = Array.from({ length: 15 }, (_, i) => record(i)).reverse();
+  storage.values.set(ANALYSIS_HISTORY_KEY, JSON.stringify(saved));
+  assert.deepEqual(await createAnalysisHistoryStore(storage).load(), saved.reverse().slice(-10));
+  assert.deepEqual(JSON.parse(storage.values.get(ANALYSIS_HISTORY_KEY)), saved.slice(-10));
+});
+
+test('UI and background share a store and clear cannot resurrect earlier queued completions', async () => {
+  const storage = memoryStorage();
+  const ui = createAnalysisHistoryStore(storage);
+  const background = createAnalysisHistoryStore(storage);
+  assert.equal(ui, background);
+  const changes = [];
+  const unsubscribe = background.subscribe((records) => changes.push(records));
+  const before = background.append(record(1));
+  const clear = ui.clear();
+  const after = background.append(record(2));
+  await Promise.all([before, clear, after]);
+  assert.deepEqual(await ui.load(), [record(2)]);
+  assert.deepEqual(JSON.parse(storage.values.get(ANALYSIS_HISTORY_KEY)), [record(2)]);
+  assert.ok(changes.some((records) => records.length === 0));
+  unsubscribe();
+  await ui.clear();
+  assert.deepEqual(await createAnalysisHistoryStore({ getItem: storage.getItem, setItem: storage.setItem }).load(), []);
+});
+
+test('a failed deletion preserves both displayed and saved records', async () => {
+  const storage = memoryStorage();
+  const store = createAnalysisHistoryStore(storage);
+  await store.append(record(1));
+  const write = storage.setItem;
+  storage.setItem = async () => { throw new Error('disk unavailable'); };
+  await assert.rejects(store.clear(), /disk unavailable/);
+  assert.deepEqual(await store.load(), [record(1)]);
+  assert.deepEqual(JSON.parse(storage.values.get(ANALYSIS_HISTORY_KEY)), [record(1)]);
+  storage.setItem = write;
+  await store.clear();
+  assert.deepEqual(await store.load(), []);
 });
 
 test('older saved records are preserved without inventing their duration', () => {

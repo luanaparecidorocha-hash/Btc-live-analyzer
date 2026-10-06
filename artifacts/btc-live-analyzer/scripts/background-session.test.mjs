@@ -31,7 +31,7 @@ class Clock {
   }
 }
 
-function setup({ notifyError = false, deferredWrite = null } = {}) {
+function setup({ notifyError = false, deferredWrite = null, deferredNotify = null } = {}) {
   const clock = new Clock();
   let data = null;
   let callbacks;
@@ -55,6 +55,7 @@ function setup({ notifyError = false, deferredWrite = null } = {}) {
     store: createAnalysisHistoryStore(storage),
     connect: (next) => { connections += 1; callbacks = next; return { close: () => { closes += 1; } }; },
     notify: async (record) => {
+      if (deferredNotify) await deferredNotify;
       if (notifyError) throw new Error('notification denied');
       order.push('notify');
       notifications.push(cycleNotificationContent(record.signal, record.direction, record.confidence));
@@ -79,6 +80,54 @@ function completeCycle(subject, start, move) {
   }
   subject.clock.advanceTo(start + 300000);
 }
+
+test('clearing completed history leaves the active window, prices, timer, feed and next completion intact', async () => {
+  const subject = setup();
+  await subject.session.start();
+  completeCycle(subject, 1000, 1);
+  await subject.session.flush();
+  subject.clock.advanceTo(306000);
+  subject.callbacks().onPrice({ timestamp: 306000, price: 81000 });
+  subject.clock.advanceTo(311000);
+  subject.callbacks().onPrice({ timestamp: 311000, price: 81001 });
+  const before = subject.state();
+  assert.equal(before.signalHistory.length, 1);
+  assert.equal(before.isRunning, true);
+  const timers = [...subject.clock.tasks.entries()];
+  const store = createAnalysisHistoryStore(subject.storage);
+  await store.clear();
+  assert.deepEqual(subject.state(), { ...before, signalHistory: [] });
+  assert.deepEqual([...subject.clock.tasks.entries()], timers);
+  assert.equal(subject.connections(), 1);
+  assert.equal(subject.closes(), 0);
+  subject.clock.advanceTo(606000);
+  await subject.session.flush();
+  assert.equal(subject.state().isRunning, true);
+  assert.equal(subject.state().signalHistory.length, 1);
+  assert.equal(subject.state().signalHistory[0].timestamp, 606000);
+  assert.deepEqual(await store.load(), subject.state().signalHistory);
+  subject.session.stop();
+});
+
+test('delayed notifications cannot reinsert completions after clear; background history stays capped', async () => {
+  let release;
+  const subject = setup({ deferredNotify: new Promise((resolve) => { release = resolve; }) });
+  await subject.session.start();
+  for (let index = 0; index < 11; index++) {
+    completeCycle(subject, 1000 + index * 300000, 1);
+    assert.ok(subject.state().signalHistory.length <= 10);
+  }
+  const store = createAnalysisHistoryStore(subject.storage);
+  await store.clear();
+  assert.deepEqual(subject.state().signalHistory, []);
+  release();
+  await subject.session.flush();
+  assert.deepEqual(subject.state().signalHistory, []);
+  assert.deepEqual(await store.load(), []);
+  assert.equal(subject.connections(), 1);
+  assert.equal(subject.closes(), 0);
+  subject.session.stop();
+});
 
 test('permission requests only notifications, asks when allowed, and does not re-prompt a final denial', async () => {
   for (const [initial, response, expected, calls] of [

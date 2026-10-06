@@ -13,6 +13,7 @@ export type AnalysisRecord = {
 };
 
 export const ANALYSIS_HISTORY_KEY = '@btc-live-analyzer/signal-history';
+export const ANALYSIS_HISTORY_LIMIT = 10;
 
 type HistoryStorage = {
   getItem: (key: string) => Promise<string | null>;
@@ -76,29 +77,73 @@ export function mergeAnalysisHistory(
 ): AnalysisRecord[] {
   const entries = new Map<number, AnalysisRecord>();
   for (const record of [...saved, ...session]) entries.set(record.timestamp, record);
-  return [...entries.values()].sort((left, right) => left.timestamp - right.timestamp);
+  return [...entries.values()].sort((left, right) => left.timestamp - right.timestamp).slice(-ANALYSIS_HISTORY_LIMIT);
 }
 
+// UI and Android headless execution must share the existing store's queue/cache.
+const stores = new WeakMap<HistoryStorage, ReturnType<typeof buildAnalysisHistoryStore>>();
+
 export function createAnalysisHistoryStore(storage: HistoryStorage) {
+  let store = stores.get(storage);
+  if (!store) {
+    store = buildAnalysisHistoryStore(storage);
+    stores.set(storage, store);
+  }
+  return store;
+}
+
+function buildAnalysisHistoryStore(storage: HistoryStorage) {
   let records: AnalysisRecord[] | null = null;
   let queue: Promise<unknown> = Promise.resolve();
+  const listeners = new Set<(records: AnalysisRecord[]) => void>();
+  function publish() {
+    for (const listener of listeners) {
+      try { listener([...(records ?? [])]); }
+      catch (error) { console.warn('Não foi possível atualizar a exibição do histórico.', error); }
+    }
+  }
   function enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const result = queue.then(operation);
     queue = result.catch(() => undefined);
     return result;
   }
   async function read() {
-    if (records === null) records = decodeAnalysisHistory(await storage.getItem(ANALYSIS_HISTORY_KEY));
+    if (records === null) {
+      const saved = decodeAnalysisHistory(await storage.getItem(ANALYSIS_HISTORY_KEY));
+      const latest = mergeAnalysisHistory(saved, []);
+      if (saved.length > ANALYSIS_HISTORY_LIMIT) {
+        await storage.setItem(ANALYSIS_HISTORY_KEY, JSON.stringify(latest));
+      }
+      records = latest;
+    }
     return records;
   }
   return {
-    load: () => enqueue(async () => [...await read()]),
+    merge: mergeAnalysisHistory,
+    load: () => enqueue(async () => {
+      await read();
+      publish();
+      return [...records!];
+    }),
+    subscribe: (listener: (records: AnalysisRecord[]) => void) => {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
     append: (record: AnalysisRecord) => enqueue(async () => {
       records = mergeAnalysisHistory(await read(), [record]);
+      publish();
       // Retain the in-memory record on a write failure. The next append retries
       // the complete history; never overwrite unread/corrupt persisted data.
       await storage.setItem(ANALYSIS_HISTORY_KEY, JSON.stringify(records));
       return [...records];
+    }),
+    clear: () => enqueue(async () => {
+      // Only clear the cache/UI after persistence succeeds. A later completion
+      // queues behind this operation; an earlier completion cannot resurrect.
+      await storage.setItem(ANALYSIS_HISTORY_KEY, '[]');
+      records = [];
+      publish();
+      return [];
     }),
   };
 }

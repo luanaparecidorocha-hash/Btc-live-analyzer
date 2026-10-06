@@ -1,5 +1,5 @@
 import type { ChartPoint, AnalysisResult } from './analysis';
-import type { AnalysisRecord } from './analysisHistory';
+import type { AnalysisRecord, mergeAnalysisHistory } from './analysisHistory';
 import type { MarketFeedConnection, MarketFeedStatus, MarketPricePoint } from './marketData';
 
 export type AnalysisSessionSnapshot = {
@@ -36,7 +36,12 @@ type SessionDependencies = {
     onStatus: (status: MarketFeedStatus) => void;
     onError: (message: string) => void;
   }) => MarketFeedConnection;
-  store: { load: () => Promise<AnalysisRecord[]>; append: (record: AnalysisRecord) => Promise<AnalysisRecord[]> };
+  store: {
+    merge: typeof mergeAnalysisHistory;
+    load: () => Promise<AnalysisRecord[]>;
+    append: (record: AnalysisRecord) => Promise<AnalysisRecord[]>;
+    subscribe?: (listener: (records: AnalysisRecord[]) => void) => () => void;
+  };
   notify: (record: AnalysisRecord) => Promise<void>;
   publish: (state: AnalysisSessionSnapshot) => void;
 };
@@ -55,6 +60,7 @@ export function createAnalysisSession(dependencies: SessionDependencies) {
     completedCycle: null, error: null,
   };
   let saving: Promise<void> = Promise.resolve();
+  let unsubscribeHistory: (() => void) | null = null;
   function publish() {
     dependencies.publish({ ...state, history: [...state.history], signalHistory: [...state.signalHistory] });
   }
@@ -72,16 +78,28 @@ export function createAnalysisSession(dependencies: SessionDependencies) {
         confidence: result.confidence, durationMs: dependencies.windowMs, reason: result.reason,
         ...(result.crossConfirmation ? { crossConfirmation: result.crossConfirmation } : {}),
       };
-      state = { ...state, completedCycle: record, signalHistory: [...state.signalHistory, record] };
+      state = { ...state, completedCycle: record, signalHistory: dependencies.store.merge(state.signalHistory, [record]) };
       publish();
       const currentGeneration = generation;
+      // Enqueue persistence at completion time, before a later manual clear.
+      // Handle rejection immediately even if an older notification is pending.
+      const persisted = dependencies.store.append(record).then(
+        (saved) => ({ saved, failed: false as const }),
+        () => ({ saved: null, failed: true as const }),
+      );
       // Persist BEFORE notifying, serialize every completed cycle, and never
       // deliver a late notification after the user has stopped the session.
       saving = saving.then(async () => {
         try {
-          const saved = await dependencies.store.append(record);
-          const merged = new Map([...saved, ...state.signalHistory].map((entry) => [entry.timestamp, entry]));
-          state = { ...state, signalHistory: [...merged.values()].sort((a, b) => a.timestamp - b.timestamp), error: null };
+          const result = await persisted;
+          if (result.failed) throw new Error('Falha ao salvar histórico.');
+          state = {
+            ...state,
+            signalHistory: dependencies.store.subscribe
+              ? state.signalHistory
+              : dependencies.store.merge(result.saved, state.signalHistory),
+            error: null,
+          };
         } catch {
           state = { ...state, error: 'Resultado mantido na sessão; não foi possível salvar o histórico no dispositivo.' };
         }
@@ -97,6 +115,10 @@ export function createAnalysisSession(dependencies: SessionDependencies) {
     start: async () => {
       if (state.isRunning) return;
       const token = ++generation;
+      unsubscribeHistory = dependencies.store.subscribe?.((records) => {
+        state = { ...state, signalHistory: records };
+        publish();
+      }) ?? null;
       state = { ...state, isRunning: true, error: null, completedCycle: null };
       publish();
       try {
@@ -133,6 +155,8 @@ export function createAnalysisSession(dependencies: SessionDependencies) {
     },
     stop: () => {
       ++generation;
+      unsubscribeHistory?.();
+      unsubscribeHistory = null;
       state = { ...state, isRunning: false, marketStatus: 'DESATIVADA', currentPrice: null, lastPriceAt: null };
       collection.stop();
       feed?.close();

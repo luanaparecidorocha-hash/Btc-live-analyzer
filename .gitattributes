@@ -1,0 +1,2 @@
+downloads/btc-live-analyzer-preview.apk filter=lfs diff=lfs merge=lfs -text
+downloads/btc-live-analyzer-capture-fix-preview.apk filter=lfs diff=lfs merge=lfs -text

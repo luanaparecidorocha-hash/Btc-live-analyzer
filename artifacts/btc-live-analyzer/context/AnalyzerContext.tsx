@@ -58,6 +58,7 @@ type AnalyzerContextValue = {
   setRegion: (region: CaptureRegion) => void;
   startAnalysis: () => Promise<void>;
   stopAnalysis: () => Promise<void>;
+  clearAnalysisHistory: () => Promise<void>;
   clearError: () => void;
 };
 
@@ -118,8 +119,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
       setCaptureHistory([]);
       setSignalHistory((current) => mergeAnalysisHistory(current, [record]));
       void historyStore.append(record)
-        .then((saved) => {
-          setSignalHistory((current) => mergeAnalysisHistory(saved, current));
+        .then(() => {
           setHistoryError(null);
         })
         .catch(() => setHistoryError('Análise mantida nesta sessão, mas não foi possível salvar o histórico no dispositivo.'));
@@ -144,7 +144,8 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
       setCurrentPrice(state.currentPrice);
       setLastPriceAt(state.lastPriceAt);
       setCompletedCycle(state.completedCycle?.timestamp === dismissedCycle.current ? null : state.completedCycle);
-      setSignalHistory((current) => mergeAnalysisHistory(state.signalHistory, current));
+      // Completed history comes from the shared persistent store, not a stale
+      // Android snapshot that could restore entries after manual deletion.
       if (!state.error) dismissedBackgroundError.current = null;
       setMarketError(state.error === dismissedBackgroundError.current ? null : state.error);
       if (state.completedCycle) {
@@ -192,14 +193,14 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let active = true;
+    const unsubscribe = historyStore.subscribe((saved) => {
+      if (active) setSignalHistory(saved);
+    });
     historyStore.load()
-      .then((saved) => {
-        if (active) setSignalHistory((current) => mergeAnalysisHistory(saved, current));
-      })
       .catch(() => {
         if (active) setHistoryError('Não foi possível carregar o histórico salvo. Os dados antigos não serão sobrescritos.');
       });
-    return () => { active = false; };
+    return () => { active = false; unsubscribe(); };
   }, [historyStore]);
 
   useEffect(() => {
@@ -271,6 +272,16 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
   const setRegion = (nextRegion: CaptureRegion) => {
     setRegionState(nextRegion);
     AsyncStorage.setItem(REGION_KEY, JSON.stringify(nextRegion)).catch(() => undefined);
+  };
+
+  const clearAnalysisHistory = async () => {
+    try {
+      await historyStore.clear();
+      setHistoryError(null);
+    } catch (error) {
+      setHistoryError('Não foi possível apagar o histórico no dispositivo. Tente novamente.');
+      throw error;
+    }
   };
 
   const startAnalysis = async () => {
@@ -459,6 +470,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
     setRegion,
     startAnalysis,
     stopAnalysis,
+    clearAnalysisHistory,
     clearError: () => {
       dismissedBackgroundError.current = marketError;
       setMarketError(null);

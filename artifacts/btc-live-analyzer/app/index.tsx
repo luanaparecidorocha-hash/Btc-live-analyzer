@@ -287,7 +287,7 @@ function AnalyzerScreen() {
           <Feather name="chevron-right" size={19} color={colors.mutedForeground} />
         </Pressable>
 
-        <AnalysisHistory records={analyzer.signalHistory} />
+        <AnalysisHistory records={analyzer.signalHistory} onClear={analyzer.clearAnalysisHistory} />
 
         <AnalysisTestPanel />
 
