@@ -14,29 +14,35 @@ import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
+import android.os.Looper
 import android.util.DisplayMetrics
-import android.view.Display
+import android.util.Log
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import java.nio.ByteBuffer
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 import kotlin.math.max
 import kotlin.math.min
 
 class ScreenCaptureService : Service() {
+  private val captureLock = Any()
   private var projection: MediaProjection? = null
+  private var projectionCallback: MediaProjection.Callback? = null
   private var virtualDisplay: android.hardware.display.VirtualDisplay? = null
   private var imageReader: ImageReader? = null
-  private var executor: ExecutorService? = null
+  private var captureThread: HandlerThread? = null
+  private var captureHandler: Handler? = null
+  @Volatile
   private var started = false
   private var cleaningUp = false
 
   override fun onCreate() {
     super.onCreate()
     createNotificationChannel()
-    executor = Executors.newSingleThreadExecutor()
+    captureThread = HandlerThread("BtcScreenCapture").apply { start() }
+    captureHandler = Handler(captureThread!!.looper)
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -88,42 +94,45 @@ class ScreenCaptureService : Service() {
     )
 
     try {
-      val manager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-      projection = manager.getMediaProjection(resultCode, resultData)
-      if (projection == null) throw IllegalStateException("O Android não forneceu uma sessão MediaProjection.")
+      synchronized(captureLock) {
+        val handler = captureHandler ?: throw IllegalStateException("Thread de captura indisponível.")
+        val manager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        val activeProjection = manager.getMediaProjection(resultCode, resultData)
+          ?: throw IllegalStateException("O Android não forneceu uma sessão MediaProjection.")
+        projection = activeProjection
 
-      imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-      imageReader?.setOnImageAvailableListener({ reader ->
-        val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
-        executor?.execute {
-          try {
-            processImage(image, width, height, region)
-          } finally {
-            image.close()
+        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        imageReader = reader
+        reader.setOnImageAvailableListener({ availableReader ->
+          consumeLatestImage(availableReader, width, height, region)
+        }, handler)
+
+        val callback = object : MediaProjection.Callback() {
+          override fun onStop() {
+            // Ignore delayed callbacks from a projection already released by us.
+            synchronized(captureLock) {
+              if (cleaningUp || projection !== activeProjection) return
+            }
+            cleanupProjection()
+            emitState("DESATIVADA", "A sessão de captura foi encerrada pelo Android.")
+            stopSelf()
           }
         }
-      }, null)
+        projectionCallback = callback
+        activeProjection.registerCallback(callback, Handler(Looper.getMainLooper()))
 
-      projection?.registerCallback(object : MediaProjection.Callback() {
-        override fun onStop() {
-          if (cleaningUp) return
-          cleanupProjection()
-          emitState("DESATIVADA", "A sessão de captura foi encerrada pelo Android.")
-          stopSelf()
-        }
-      }, null)
-
-      virtualDisplay = projection?.createVirtualDisplay(
-        "BTC Live Analyzer",
-        width,
-        height,
-        density,
-        android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-        imageReader?.surface,
-        null,
-        null
-      )
-      started = true
+        virtualDisplay = activeProjection.createVirtualDisplay(
+          "BTC Live Analyzer",
+          width,
+          height,
+          density,
+          android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+          reader.surface,
+          null,
+          null
+        ) ?: throw IllegalStateException("O Android não forneceu um VirtualDisplay.")
+        started = true
+      }
       currentState = mapOf<String, Any>("status" to "ATIVA")
       emitState("ATIVA", null)
     } catch (error: Exception) {
@@ -133,8 +142,34 @@ class ScreenCaptureService : Service() {
     }
   }
 
-  private fun processImage(image: Image, screenWidth: Int, screenHeight: Int, region: CaptureRegion) {
-    val plane = image.planes.firstOrNull() ?: return
+  private fun consumeLatestImage(reader: ImageReader, width: Int, height: Int, region: CaptureRegion) {
+    val frame = synchronized(captureLock) {
+      // Serializes acquisition with shutdown, including callbacks queued before STOP.
+      if (!started || cleaningUp || reader !== imageReader) return
+      var image: Image? = null
+      try {
+        image = reader.acquireLatestImage() ?: return
+        processImage(image, width, height, region)
+      } catch (error: Exception) {
+        Log.w(TAG, "Falha ao ler/processar um frame de captura.", error)
+        null
+      } finally {
+        image?.close()
+      }
+    }
+    // Only copied scalar results cross the bridge; no Image/plane/buffer escapes.
+    // The Image is already closed, even if the bridge queues work asynchronously.
+    if (frame != null && started) {
+      try {
+        eventSink?.invoke("onFrame", frame)
+      } catch (error: Exception) {
+        Log.w(TAG, "Falha ao entregar o resultado do frame de captura.", error)
+      }
+    }
+  }
+
+  private fun processImage(image: Image, screenWidth: Int, screenHeight: Int, region: CaptureRegion): Map<String, Any>? {
+    val plane = image.planes.firstOrNull() ?: return null
     val buffer: ByteBuffer = plane.buffer
     val pixelStride = plane.pixelStride
     val rowStride = plane.rowStride
@@ -170,16 +205,16 @@ class ScreenCaptureService : Service() {
       }
     }
 
-    if (candidatePixels < MIN_CANDIDATE_PIXELS || sampledPixels == 0) return
+    if (candidatePixels < MIN_CANDIDATE_PIXELS || sampledPixels == 0) return null
 
     val centerY = weightedY / candidatePixels.toDouble()
     val normalizedPosition = 1f - ((centerY - top) / max(1f, (bottom - top).toFloat()))
-    eventSink?.invoke("onFrame", mapOf(
+    return mapOf(
       "timestamp" to System.currentTimeMillis(),
       "position" to normalizedPosition.coerceIn(0.0, 1.0),
       "meanLuma" to (lumaTotal.toFloat() / sampledPixels.toFloat()),
       "candidatePixels" to candidatePixels
-    ))
+    )
   }
 
   private fun createNotificationChannel() {
@@ -224,18 +259,39 @@ class ScreenCaptureService : Service() {
   }
 
   private fun cleanupProjection() {
-    cleaningUp = true
-    try {
+    synchronized(captureLock) {
+      if (cleaningUp) return
+      cleaningUp = true
       started = false
-      virtualDisplay?.release()
-      virtualDisplay = null
-      imageReader?.close()
-      imageReader = null
+      val activeDisplay = virtualDisplay
+      val activeReader = imageReader
       val activeProjection = projection
+      val activeCallback = projectionCallback
+      virtualDisplay = null
+      imageReader = null
       projection = null
-      activeProjection?.stop()
-    } finally {
-      cleaningUp = false
+      projectionCallback = null
+      try {
+        // No acquired Image remains: processing and its finally share this lock.
+        releaseCaptureResource("listener") { activeReader?.setOnImageAvailableListener(null, null) }
+        releaseCaptureResource("VirtualDisplay") { activeDisplay?.release() }
+        releaseCaptureResource("ImageReader") { activeReader?.close() }
+        releaseCaptureResource("callback MediaProjection") {
+          if (activeProjection != null && activeCallback != null) activeProjection.unregisterCallback(activeCallback)
+        }
+        releaseCaptureResource("MediaProjection") { activeProjection?.stop() }
+      } finally {
+        cleaningUp = false
+      }
+    }
+  }
+
+  private fun releaseCaptureResource(name: String, release: () -> Unit) {
+    try {
+      release()
+    } catch (error: Exception) {
+      // A failed release must not prevent the remaining resources being closed.
+      Log.w(TAG, "Falha ao liberar $name.", error)
     }
   }
 
@@ -249,8 +305,10 @@ class ScreenCaptureService : Service() {
   override fun onDestroy() {
     val wasRunning = started
     cleanupProjection()
-    executor?.shutdownNow()
-    executor = null
+    captureHandler?.removeCallbacksAndMessages(null)
+    captureHandler = null
+    captureThread?.quitSafely()
+    captureThread = null
     if (wasRunning && currentState?.get("status") != "DESATIVADA") {
       emitState("DESATIVADA", "A captura foi interrompida.")
     }
@@ -267,6 +325,7 @@ class ScreenCaptureService : Service() {
   )
 
   companion object {
+    private const val TAG = "BtcScreenCapture"
     const val EXTRA_RESULT_CODE = "btc_capture_result_code"
     const val EXTRA_RESULT_DATA = "btc_capture_result_data"
     const val EXTRA_REGION_LEFT = "btc_capture_region_left"
