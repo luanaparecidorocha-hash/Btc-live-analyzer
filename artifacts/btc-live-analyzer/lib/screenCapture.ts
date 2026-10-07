@@ -25,6 +25,7 @@ export type NativeCaptureFrame = {
 };
 
 type NativeCaptureModule = {
+  getState: () => Promise<{ status: CaptureStatus; message?: string }>;
   requestPermission: () => Promise<CapturePermissionResult>;
   start: (region: CaptureRegion) => Promise<void>;
   stop: () => Promise<void>;
@@ -60,6 +61,11 @@ export async function startScreenCapture(region: CaptureRegion): Promise<void> {
 export async function stopScreenCapture(): Promise<void> {
   if (!nativeCapture) return;
   await nativeCapture.stop();
+}
+
+export async function getScreenCaptureState(): Promise<{ status: CaptureStatus; message?: string }> {
+  if (!nativeCapture) return { status: 'DESATIVADA' };
+  return nativeCapture.getState();
 }
 
 export function subscribeCaptureState(listener: (status: CaptureStatus, message?: string) => void): { remove: () => void } {

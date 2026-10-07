@@ -7,6 +7,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.media.Image
@@ -18,10 +20,12 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import java.nio.ByteBuffer
 import kotlin.math.max
 import kotlin.math.min
@@ -37,34 +41,53 @@ class ScreenCaptureService : Service() {
   @Volatile
   private var started = false
   private var cleaningUp = false
+  private var lastProcessedAt = 0L
+  @Volatile private var userStopped = false
+  private var readFailures = 0
+  private val stopReceiver = object : BroadcastReceiver() {
+    override fun onReceive(context: Context?, intent: Intent?) {
+      if (intent?.action != ACTION_STOP_CAPTURE) return
+      userStopped = true
+      emitState("DESATIVADA", null)
+      getSystemService(NotificationManager::class.java).cancel(INTERRUPTED_ID)
+      stopSelf()
+    }
+  }
 
   override fun onCreate() {
     super.onCreate()
+    instance = this
     createNotificationChannel()
+    ContextCompat.registerReceiver(this, stopReceiver, IntentFilter(ACTION_STOP_CAPTURE), ContextCompat.RECEIVER_NOT_EXPORTED)
     captureThread = HandlerThread("BtcScreenCapture").apply { start() }
     captureHandler = Handler(captureThread!!.looper)
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     if (intent == null) {
-      emitState("ERRO", "O serviço foi reiniciado sem a autorização MediaProjection.")
+      reportInterruption("O serviço foi reiniciado sem autorização. Abra o app e inicie a captura novamente.")
       stopSelf()
       return START_NOT_STICKY
     }
 
-    val notification = createNotification()
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-      startForeground(
-        NOTIFICATION_ID,
-        notification,
-        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-      )
-    } else {
-      startForeground(NOTIFICATION_ID, notification)
-    }
-
-    if (!started) {
-      startProjection(intent)
+    try {
+      val notification = createNotification()
+      getSystemService(NotificationManager::class.java).cancel(INTERRUPTED_ID)
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        startForeground(
+          NOTIFICATION_ID,
+          notification,
+          ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+        )
+      } else {
+        startForeground(NOTIFICATION_ID, notification)
+      }
+      if (!started) startProjection(intent)
+    } catch (error: Exception) {
+      reportInterruption("Não foi possível manter o serviço de captura: ${error.message}")
+      cleanupProjection()
+      stopSelf()
+      return START_NOT_STICKY
     }
     return START_STICKY
   }
@@ -73,7 +96,7 @@ class ScreenCaptureService : Service() {
     val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, -1)
     val resultData = intent.parcelableExtraCompat<Intent>(EXTRA_RESULT_DATA)
     if (resultCode != android.app.Activity.RESULT_OK || resultData == null) {
-      emitState("ERRO", "Dados inválidos para iniciar a captura MediaProjection.")
+      reportInterruption("Dados inválidos para iniciar a captura MediaProjection.")
       stopSelf()
       return
     }
@@ -114,8 +137,19 @@ class ScreenCaptureService : Service() {
               if (cleaningUp || projection !== activeProjection) return
             }
             cleanupProjection()
-            emitState("DESATIVADA", "A sessão de captura foi encerrada pelo Android.")
+            reportInterruption("O Android interrompeu a captura. Abra o app e inicie novamente para autorizar uma nova sessão.")
             stopSelf()
+          }
+
+          override fun onCapturedContentVisibilityChanged(isVisible: Boolean) {
+            synchronized(captureLock) {
+              if (!started || cleaningUp || projection !== activeProjection) return
+            }
+            val message = if (isVisible) null else "O conteúdo capturado não está visível. A captura está pausada pelo Android."
+            emitState(if (isVisible) "ATIVA" else "ERRO", message)
+            getSystemService(NotificationManager::class.java).notify(
+              NOTIFICATION_ID, createNotification(message)
+            )
           }
         }
         projectionCallback = callback
@@ -136,7 +170,7 @@ class ScreenCaptureService : Service() {
       currentState = mapOf<String, Any>("status" to "ATIVA")
       emitState("ATIVA", null)
     } catch (error: Exception) {
-      emitState("ERRO", error.message ?: "Erro desconhecido ao iniciar a captura.")
+      reportInterruption(error.message ?: "Erro desconhecido ao iniciar a captura.")
       cleanupProjection()
       stopSelf()
     }
@@ -149,13 +183,20 @@ class ScreenCaptureService : Service() {
       var image: Image? = null
       try {
         image = reader.acquireLatestImage() ?: return
-        processImage(image, width, height, region)
+        processImage(image, width, height, region).also { readFailures = 0 }
       } catch (error: Exception) {
+        readFailures += 1
         Log.w(TAG, "Falha ao ler/processar um frame de captura.", error)
         null
       } finally {
         image?.close()
       }
+    }
+    if (readFailures >= 3) {
+      reportInterruption("Falha ao ler a captura. Abra o app e inicie novamente.")
+      cleanupProjection()
+      stopSelf()
+      return
     }
     // Only copied scalar results cross the bridge; no Image/plane/buffer escapes.
     // The Image is already closed, even if the bridge queues work asynchronously.
@@ -169,6 +210,11 @@ class ScreenCaptureService : Service() {
   }
 
   private fun processImage(image: Image, screenWidth: Int, screenHeight: Int, region: CaptureRegion): Map<String, Any>? {
+    // Always acquire/close available Images, but avoid scanning/bridging every
+    // display refresh. This does not change price analysis or five-minute cycles.
+    val now = SystemClock.elapsedRealtime()
+    if (lastProcessedAt != 0L && now - lastProcessedAt < FRAME_INTERVAL_MS) return null
+    lastProcessedAt = now
     val plane = image.planes.firstOrNull() ?: return null
     val buffer: ByteBuffer = plane.buffer
     val pixelStride = plane.pixelStride
@@ -228,7 +274,7 @@ class ScreenCaptureService : Service() {
     )
   }
 
-  private fun createNotification(): Notification {
+  private fun createNotification(message: String? = null): Notification {
     val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
     val pendingIntent = launchIntent?.let {
       PendingIntent.getActivity(
@@ -242,8 +288,9 @@ class ScreenCaptureService : Service() {
     return NotificationCompat.Builder(this, CHANNEL_ID)
       .setSmallIcon(android.R.drawable.ic_menu_view)
       .setContentTitle("BTC Live Analyzer")
-      .setContentText("Captura de tela ativa; os frames são processados somente no dispositivo.")
+      .setContentText(message ?: "Captura de tela ativa; os frames são processados somente no dispositivo.")
       .setOngoing(true)
+      .setOnlyAlertOnce(true)
       .setCategory(NotificationCompat.CATEGORY_SERVICE)
       .setContentIntent(pendingIntent)
       .build()
@@ -255,7 +302,25 @@ class ScreenCaptureService : Service() {
       if (message != null) put("message", message)
     }
     currentState = state
-    eventSink?.invoke("onCaptureStateChanged", state)
+    try {
+      eventSink?.invoke("onCaptureStateChanged", state)
+    } catch (error: Exception) {
+      Log.w(TAG, "Estado de captura retido para a próxima abertura do app.", error)
+    }
+  }
+
+  private fun reportInterruption(message: String) {
+    emitState("ERRO", message)
+    val warning = NotificationCompat.Builder(this, CHANNEL_ID)
+      .setSmallIcon(android.R.drawable.ic_menu_view)
+      .setContentTitle("BTC · captura interrompida")
+      .setContentText(message)
+      .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+      .setContentIntent(createNotification().contentIntent)
+      .setAutoCancel(true)
+      .setOnlyAlertOnce(true)
+      .build()
+    getSystemService(NotificationManager::class.java).notify(INTERRUPTED_ID, warning)
   }
 
   private fun cleanupProjection() {
@@ -309,9 +374,11 @@ class ScreenCaptureService : Service() {
     captureHandler = null
     captureThread?.quitSafely()
     captureThread = null
-    if (wasRunning && currentState?.get("status") != "DESATIVADA") {
-      emitState("DESATIVADA", "A captura foi interrompida.")
+    unregisterReceiver(stopReceiver)
+    if (wasRunning && !userStopped) {
+      reportInterruption("O serviço de captura foi interrompido. Abra o app e inicie novamente.")
     }
+    if (instance === this) instance = null
     super.onDestroy()
   }
 
@@ -334,6 +401,9 @@ class ScreenCaptureService : Service() {
     const val EXTRA_REGION_HEIGHT = "btc_capture_region_height"
     private const val CHANNEL_ID = "btc-capture"
     private const val NOTIFICATION_ID = 7314
+    private const val INTERRUPTED_ID = 7315
+    private const val FRAME_INTERVAL_MS = 1000L
+    const val ACTION_STOP_CAPTURE = "com.btcliveanalyzer.STOP_CAPTURE"
     private const val MIN_CANDIDATE_PIXELS = 3
 
     @Volatile
@@ -341,6 +411,15 @@ class ScreenCaptureService : Service() {
 
     @Volatile
     var eventSink: ((String, Map<String, Any>) -> Unit)? = null
+    @Volatile private var instance: ScreenCaptureService? = null
+
+    fun requestStop(context: Context) {
+      // Package-private receiver: no Activity or JS runtime is needed to stop.
+      currentState = mapOf("status" to "DESATIVADA")
+      instance?.userStopped = true
+      context.getSystemService(NotificationManager::class.java).cancel(INTERRUPTED_ID)
+      context.stopService(Intent(context, ScreenCaptureService::class.java))
+    }
   }
 }
 

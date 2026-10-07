@@ -2,7 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { binanceMarketFeed } from '@/lib/binanceMarketData';
 import { createCrossConfirmedAnalyzer } from '@/lib/crossConfirmation';
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Platform } from 'react-native';
+import { Alert, AppState, Platform } from 'react-native';
 import {
   analyzeChart,
   DEFAULT_ANALYSIS_WINDOW_MS,
@@ -14,6 +14,7 @@ import {
   CaptureRegion,
   CaptureStatus,
   isNativeCaptureAvailable,
+  getScreenCaptureState,
   requestScreenCapturePermission,
   startScreenCapture,
   stopScreenCapture,
@@ -131,7 +132,6 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
     const native = nativeBackgroundAnalysis;
     if (!native) return;
     let active = true;
-    let received = false;
     function restore(state: AnalysisSessionSnapshot) {
       if (!active) return;
       backgroundRunning.current = state.isRunning;
@@ -153,13 +153,13 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
         setLastSignalAt(state.completedCycle.timestamp);
       }
     }
-    const subscription = subscribeBackgroundAnalysis((state) => { received = true; restore(state); });
+    const subscription = subscribeBackgroundAnalysis(restore);
     // Native startup may fail before Headless JS begins publishing. Likewise,
     // a destroyed service must not leave a stale "running" UI behind.
     const stopSubscription = native.addListener('onAnalysisStop', (payload) => {
       void native.isActive().then(async (running) => {
         if (!active || running) return;
-        runGeneration.current += 1;
+        const stoppedGeneration = ++runGeneration.current;
         backgroundRunning.current = false;
         setIsRunning(false);
         setMarketStatus('DESATIVADA');
@@ -169,18 +169,47 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
           setMarketError(payload.message);
         }
         const state = await getBackgroundAnalysisSnapshot();
+        if (!active || stoppedGeneration !== runGeneration.current) return;
         if (state && !state.isRunning) restore(state);
         await stopScreenCapture();
       }).catch(() => {
         if (active) setMarketError('Não foi possível consultar a parada do serviço Android.');
       });
     });
-    void getBackgroundAnalysisSnapshot().then((state) => {
-      if (state && !received) restore(state);
-    }).catch(() => {
+    let refreshGeneration = 0;
+    async function refreshNativeState() {
+      if (starting.current) return; // Permission Activity is not a new analysis run.
+      const generation = ++refreshGeneration;
+      const run = runGeneration.current;
+      const [running, state, capture] = await Promise.all([
+        native!.isActive(), getBackgroundAnalysisSnapshot(), getScreenCaptureState(),
+      ]);
+      if (!active || generation !== refreshGeneration || run !== runGeneration.current || starting.current) return;
+      if (state) restore({
+        ...state,
+        isRunning: running,
+        marketStatus: running ? state.marketStatus : 'DESATIVADA',
+        currentPrice: running ? state.currentPrice : null,
+        lastPriceAt: running ? state.lastPriceAt : null,
+      });
+      else {
+        backgroundRunning.current = running;
+        setIsRunning(running);
+        if (!running) setMarketStatus('DESATIVADA');
+      }
+      captureStatusRef.current = capture.status;
+      setCaptureStatus(capture.status);
+      setCaptureError(capture.message ?? (capture.status === 'ERRO' ? 'A captura foi interrompida.' : null));
+    }
+    const appStateSubscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') void refreshNativeState().catch(() => {
+        if (active) setMarketError('Não foi possível consultar o estado real dos serviços Android.');
+      });
+    });
+    void refreshNativeState().catch(() => {
       if (active) setMarketError('Não foi possível restaurar o estado do serviço Android.');
     });
-    return () => { active = false; subscription.remove(); stopSubscription.remove(); };
+    return () => { active = false; subscription.remove(); stopSubscription.remove(); appStateSubscription.remove(); };
   }, []);
 
   useEffect(() => {
@@ -207,7 +236,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
     const stateSubscription = subscribeCaptureState((status, message) => {
       captureStatusRef.current = status;
       setCaptureStatus(status);
-      if (status === 'ERRO') setCaptureError(message ?? 'O serviço de captura encontrou um erro.');
+      if (status === 'ERRO' || message) setCaptureError(message ?? 'O serviço de captura encontrou um erro.');
       if (status === 'ATIVA') setCaptureError(null);
     });
     const frameSubscription = subscribeCaptureFrames((frame) => {

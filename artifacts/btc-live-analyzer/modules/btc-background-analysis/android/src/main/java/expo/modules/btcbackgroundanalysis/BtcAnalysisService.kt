@@ -36,7 +36,7 @@ class BtcAnalysisService : HeadlessJsTaskService() {
       val notification = NotificationCompat.Builder(this, RUNNING_CHANNEL)
         .setSmallIcon(android.R.drawable.ic_dialog_info)
         .setContentTitle("BTC · análise contínua ativa")
-        .setContentText("Coleta Kraken em ciclos de 5 minutos. Toque para abrir o aplicativo.")
+        .setContentText("Kraken + Binance em ciclos de 5 minutos. Toque para abrir o aplicativo.")
         .setContentIntent(openApp(this))
         .setOngoing(true)
         .setOnlyAlertOnce(true)
@@ -110,6 +110,7 @@ class BtcAnalysisService : HeadlessJsTaskService() {
       if (active) return false
       active = true
       runToken += 1
+      snapshot = null
       return true
     }
 
@@ -125,11 +126,23 @@ class BtcAnalysisService : HeadlessJsTaskService() {
     }
 
     @Synchronized fun endService(context: Context, token: Long) {
+      val message = if (token == runToken && active) {
+        "O serviço Android foi interrompido. Inicie novamente pelo aplicativo."
+      } else "Serviço Android interrompido."
       if (token == runToken) {
+        val unexpected = active
         active = false
+        snapshot?.let {
+          val state = JSONObject(it)
+          state.put("isRunning", false)
+          state.put("marketStatus", "DESATIVADA")
+          if (unexpected) state.put("error", "O serviço Android foi interrompido. Inicie novamente pelo aplicativo.")
+          snapshot = state.toString()
+        }
+        stopCapture(context)
         cancelNotifications(context)
       }
-      eventSink?.invoke("onAnalysisStop", mapOf("message" to "Serviço Android interrompido.", "runToken" to token.toDouble()))
+      eventSink?.invoke("onAnalysisStop", mapOf("message" to message, "runToken" to token.toDouble()))
     }
 
     fun createChannels(context: Context) {
@@ -170,6 +183,7 @@ class BtcAnalysisService : HeadlessJsTaskService() {
 
     @Synchronized fun requestStop(context: Context, message: String = "Análise interrompida pelo usuário.") {
       active = false
+      stopCapture(context)
       // Retain the last snapshot for reopening the UI, but never report a dead
       // service as running. Real history remains in the existing AsyncStorage.
       snapshot?.let {
@@ -182,6 +196,10 @@ class BtcAnalysisService : HeadlessJsTaskService() {
       eventSink?.invoke("onAnalysisStop", mapOf("message" to message, "runToken" to runToken.toDouble()))
       context.stopService(Intent(context, BtcAnalysisService::class.java))
       cancelNotifications(context)
+    }
+
+    private fun stopCapture(context: Context) {
+      context.sendBroadcast(Intent("com.btcliveanalyzer.STOP_CAPTURE").setPackage(context.packageName))
     }
   }
 }
