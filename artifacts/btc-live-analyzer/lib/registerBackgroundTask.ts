@@ -10,10 +10,12 @@ import { stopScreenCapture } from './screenCapture';
 import { cycleNotificationContent } from './notificationPolicy';
 import { acquireBinanceMarketFeed, binanceMarketFeed } from './binanceMarketData';
 import { createCrossConfirmedAnalyzer } from './crossConfirmation';
+import { createSignalLearningStore } from './signalLearning';
 
 let currentTask: Promise<void> | null = null;
 let taskStopping = false;
 const androidHistoryStore = createAnalysisHistoryStore(AsyncStorage);
+const learningStore = createSignalLearningStore(AsyncStorage);
 const analyzeCrossConfirmed = createCrossConfirmedAnalyzer(analyzeChart, binanceMarketFeed.getSnapshot);
 
 async function runBackgroundAnalysis(runToken: number) {
@@ -29,8 +31,10 @@ async function runBackgroundAnalysis(runToken: number) {
     createCollection: createContinuousCollection,
     connect: connectBtcUsdTicker,
     store: androidHistoryStore,
+    learning: learningStore,
     notify: (record) => {
-      const content = cycleNotificationContent(record.signal, record.direction, record.confidence);
+      const recommendation = record.signal === 'AGUARDAR' ? null : learningStore.recommendation(record.signal);
+      const content = cycleNotificationContent(record.signal, record.direction, record.confidence, recommendation);
       return native.notifyCycle(content.title, content.body, runToken);
     },
     publish: (state) => {
@@ -47,7 +51,7 @@ async function runBackgroundAnalysis(runToken: number) {
     }
     session.stop();
     // Finish writes for already-completed cycles, but never notify after stop.
-    void Promise.all([session.flush(), stopScreenCapture().catch(() => undefined)])
+    void Promise.all([session.flush(), learningStore.flush(), stopScreenCapture().catch(() => undefined)])
       .finally(resolveFinished);
   }
   const stopSubscription = native.addListener('onAnalysisStop', (payload) => {
@@ -56,6 +60,8 @@ async function runBackgroundAnalysis(runToken: number) {
   let releaseBinance: (() => void) | null = null;
   try {
     if (!await native.isActive() || stopped) return;
+    await learningStore.load().catch(() => undefined);
+    if (stopped || !await native.isActive()) return;
     releaseBinance = acquireBinanceMarketFeed();
     await session.start();
     if (stopped) return;

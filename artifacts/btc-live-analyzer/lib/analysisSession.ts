@@ -43,6 +43,11 @@ type SessionDependencies = {
     subscribe?: (listener: (records: AnalysisRecord[]) => void) => () => void;
   };
   notify: (record: AnalysisRecord) => Promise<void>;
+  learning?: {
+    register: (record: AnalysisRecord) => void;
+    observe: (point: MarketPricePoint) => void;
+    interrupt: () => void;
+  };
   publish: (state: AnalysisSessionSnapshot) => void;
 };
 
@@ -78,6 +83,7 @@ export function createAnalysisSession(dependencies: SessionDependencies) {
         confidence: result.confidence, durationMs: dependencies.windowMs, reason: result.reason,
         ...(result.crossConfirmation ? { crossConfirmation: result.crossConfirmation } : {}),
       };
+      dependencies.learning?.register(record);
       state = { ...state, completedCycle: record, signalHistory: dependencies.store.merge(state.signalHistory, [record]) };
       publish();
       const currentGeneration = generation;
@@ -136,11 +142,13 @@ export function createAnalysisSession(dependencies: SessionDependencies) {
           if (!state.isRunning || token !== generation) return;
           state = { ...state, currentPrice: point.price, lastPriceAt: point.timestamp };
           collection.push(point);
+          dependencies.learning?.observe(point);
         },
         onStatus: (status) => {
           if (!state.isRunning || token !== generation) return;
           state = { ...state, marketStatus: status };
           if (status === 'RECONECTANDO') {
+            dependencies.learning?.interrupt();
             state = { ...state, currentPrice: null, lastPriceAt: null };
             collection.reconnect();
           }
@@ -154,6 +162,7 @@ export function createAnalysisSession(dependencies: SessionDependencies) {
       });
     },
     stop: () => {
+      dependencies.learning?.interrupt();
       ++generation;
       unsubscribeHistory?.();
       unsubscribeHistory = null;

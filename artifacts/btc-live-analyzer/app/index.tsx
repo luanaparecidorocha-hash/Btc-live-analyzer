@@ -20,6 +20,7 @@ import type { ChartPoint } from '@/lib/analysis';
 import type { CaptureRegion } from '@/lib/screenCapture';
 import { AnalysisHistory } from '@/components/AnalysisHistory';
 import { AnalysisTestPanel } from '@/components/AnalysisTestPanel';
+import { SignalLearningDetails } from '@/components/SignalLearningDetails';
 
 const signalColor = {
   'POSSÍVEL COMPRA': '#55d6a6',
@@ -288,6 +289,8 @@ function AnalyzerScreen() {
         </Pressable>
 
         <AnalysisHistory records={analyzer.signalHistory} onClear={analyzer.clearAnalysisHistory} />
+
+        <SignalLearningDetails learning={analyzer.learning} />
 
         <AnalysisTestPanel />
 

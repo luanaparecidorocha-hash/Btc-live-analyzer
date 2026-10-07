@@ -27,6 +27,8 @@ import type { AnalysisRecord } from '@/lib/analysisHistory';
 import { createContinuousCollection } from '@/lib/continuousCollection';
 import { getBackgroundAnalysisSnapshot, isBackgroundAnalysisAvailable, nativeBackgroundAnalysis, subscribeBackgroundAnalysis } from '@/lib/backgroundAnalysis';
 import type { AnalysisSessionSnapshot } from '@/lib/analysisSession';
+import { createSignalLearningStore } from '@/lib/signalLearning';
+import type { LearningSnapshot } from '@/lib/signalLearning';
 
 export type SignalRecord = AnalysisRecord;
 const analyzeCrossConfirmed = createCrossConfirmedAnalyzer(analyzeChart, binanceMarketFeed.getSnapshot);
@@ -47,6 +49,7 @@ type AnalyzerContextValue = {
   currentPrice: number | null;
   lastPriceAt: number | null;
   signalHistory: SignalRecord[];
+  learning: LearningSnapshot;
   region: CaptureRegion;
   lastSignal: Signal;
   lastSignalAt: number | null;
@@ -88,6 +91,8 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const historyStore = useMemo(() => createAnalysisHistoryStore(AsyncStorage), []);
+  const learningStore = useMemo(() => createSignalLearningStore(AsyncStorage), []);
+  const [learning, setLearning] = useState<LearningSnapshot>(() => learningStore.snapshot());
   const marketConnection = useRef<MarketFeedConnection | null>(null);
   const captureStatusRef = useRef<CaptureStatus>('DESATIVADA');
   const runGeneration = useRef(0);
@@ -114,6 +119,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
         reason: result.reason,
         crossConfirmation: result.crossConfirmation,
       };
+      learningStore.register(record);
       setLastSignal(result.signal);
       setLastSignalAt(completedAt);
       setCompletedCycle(record);
@@ -124,9 +130,18 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
           setHistoryError(null);
         })
         .catch(() => setHistoryError('Análise mantida nesta sessão, mas não foi possível salvar o histórico no dispositivo.'));
-      void notifySignal(result.signal, result.confidence, result.trend).catch(() => undefined);
+      const recommendation = result.signal === 'AGUARDAR' ? null : learningStore.recommendation(result.signal);
+      void notifySignal(result.signal, result.confidence, result.trend, recommendation)
+        .catch(() => setMarketError('O ciclo foi concluído, mas a notificação não pôde ser exibida.'));
     },
-  }), [historyStore]);
+  }), [historyStore, learningStore]);
+
+  useEffect(() => {
+    const unsubscribe = learningStore.subscribe(setLearning);
+    setLearning(learningStore.snapshot());
+    void learningStore.load().catch(() => undefined); // Error is shown in the learning panel.
+    return unsubscribe;
+  }, [learningStore]);
 
   useEffect(() => {
     const native = nativeBackgroundAnalysis;
@@ -262,6 +277,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => () => {
     runGeneration.current += 1;
     collection.stop();
+    if (!backgroundRunning.current) learningStore.interrupt();
     marketConnection.current?.close();
     marketConnection.current = null;
   }, [collection]);
@@ -318,6 +334,8 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
     starting.current = true;
     const generation = ++runGeneration.current;
     try {
+    await learningStore.load().catch(() => undefined);
+    if (generation !== runGeneration.current) return;
     if (nativeBackgroundAnalysis) {
       if (await nativeBackgroundAnalysis.isActive()) return;
       const permitted = await prepareNotifications();
@@ -363,11 +381,13 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
         setLastPriceAt(point.timestamp);
         setMarketError(null);
         collection.push(point);
+        learningStore.observe(point);
       },
       onStatus: (status: MarketFeedStatus) => {
         if (generation !== runGeneration.current || !collection.isRunning()) return;
         setMarketStatus(status);
         if (status === 'RECONECTANDO') {
+          learningStore.interrupt();
           collection.reconnect();
           setCaptureHistory([]);
           setCurrentPrice(null);
@@ -429,6 +449,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
 
   const stopAnalysis = async () => {
     runGeneration.current += 1;
+    learningStore.interrupt();
     backgroundRunning.current = false;
     collection.stop();
     setIsRunning(false);
@@ -484,6 +505,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
     currentPrice,
     lastPriceAt,
     signalHistory,
+    learning,
     region,
     lastSignal,
     lastSignalAt,
@@ -524,6 +546,7 @@ export function AnalyzerProvider({ children }: { children: React.ReactNode }) {
     marketStatus,
     region,
     signalHistory,
+    learning,
   ]);
 
   return <AnalyzerContext.Provider value={value}>{children}</AnalyzerContext.Provider>;
