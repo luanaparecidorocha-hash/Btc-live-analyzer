@@ -20,7 +20,7 @@ export function AnalysisTestPanel() {
   function runScenario(scenario: AnalysisScenario) {
     if (!enabled) return;
     const input = createAnalysisScenario(scenario, DEFAULT_ANALYSIS_WINDOW_MS);
-    const result = analyzeChart(input.points, input.windowMs, input.now);
+    const result = analyzeChart(input.points, input.windowMs, input.now, input.candles);
     setExecution({ scenario, sampleCount: input.points.length, result });
   }
 

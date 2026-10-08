@@ -1,4 +1,4 @@
-import type { ChartPoint } from './analysis';
+import type { ChartPoint, OhlcCandle } from './analysis';
 
 export const ANALYSIS_SCENARIOS = ['ALTA', 'BAIXA', 'LATERAL'] as const;
 export type AnalysisScenario = typeof ANALYSIS_SCENARIOS[number];
@@ -24,5 +24,26 @@ export function createAnalysisScenario(scenario: AnalysisScenario, windowMs: num
       return { timestamp, price: basePrice * (1 + changePercent / 100) };
     },
   );
-  return { scenario, points, windowMs, now: windowMs };
+  const candleDirections = scenario === 'ALTA'
+    ? Array(5).fill('ALTA')
+    : scenario === 'BAIXA'
+      ? Array(5).fill('BAIXA')
+      : ['ALTA', 'BAIXA', 'ALTA', 'BAIXA', 'NEUTRA'];
+  let candlePrice = basePrice;
+  const candles: OhlcCandle[] = candleDirections.map((direction, index) => {
+    const open = candlePrice;
+    const change = direction === 'ALTA' ? 0.04 : direction === 'BAIXA' ? -0.04 : 0;
+    const close = open * (1 + change / 100);
+    const body = Math.abs(close - open);
+    const wick = body > 0 ? body / 8 : open * 0.0002;
+    candlePrice = close;
+    return {
+      timestamp: index * 60_000,
+      open,
+      high: Math.max(open, close) + wick,
+      low: Math.min(open, close) - wick,
+      close,
+    };
+  });
+  return { scenario, points, candles, windowMs, now: windowMs };
 }

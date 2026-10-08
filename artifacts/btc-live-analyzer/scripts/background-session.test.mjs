@@ -5,6 +5,7 @@ import { createContinuousCollection } from '../lib/continuousCollection.ts';
 import { analyzeChart, DEFAULT_ANALYSIS_WINDOW_MS } from '../lib/analysis.ts';
 import { createAnalysisHistoryStore } from '../lib/analysisHistory.ts';
 import { cycleNotificationContent, requestNotificationPermission } from '../lib/notificationPolicy.ts';
+import { createSignalLearningStore } from '../lib/signalLearning.ts';
 
 class Clock {
   time = 1000;
@@ -31,7 +32,7 @@ class Clock {
   }
 }
 
-function setup({ notifyError = false, deferredWrite = null, deferredNotify = null } = {}) {
+function setup({ notifyError = false, deferredWrite = null, deferredNotify = null, learning = undefined } = {}) {
   const clock = new Clock();
   let data = null;
   let callbacks;
@@ -53,6 +54,7 @@ function setup({ notifyError = false, deferredWrite = null, deferredNotify = nul
     analyze: analyzeChart,
     createCollection: (options) => createContinuousCollection(options, clock),
     store: createAnalysisHistoryStore(storage),
+    learning,
     connect: (next) => { connections += 1; callbacks = next; return { close: () => { closes += 1; } }; },
     notify: async (record) => {
       if (deferredNotify) await deferredNotify;
@@ -77,6 +79,19 @@ function completeCycle(subject, start, move) {
     subject.clock.advanceTo(timestamp);
     subject.callbacks().onStatus('CONECTADO');
     subject.callbacks().onPrice({ timestamp, price: 80000 * (1 + move * index / 60 / 100) });
+  }
+  let close = 80000;
+  for (let index = 0; index < 5; index += 1) {
+    const open = close;
+    close = open * (1 + move / 5 / 100);
+    const wick = open * 0.00001;
+    subject.callbacks().onCandle({
+      timestamp: start + index * 60000,
+      open,
+      high: Math.max(open, close) + wick,
+      low: Math.min(open, close) - wick,
+      close,
+    });
   }
   subject.clock.advanceTo(start + 300000);
 }
@@ -162,6 +177,7 @@ test('headless session has one feed/timer, saves before each notification and au
   assert.equal(subject.connections(), 1);
   completeCycle(subject, 1000, 0.2);
   await subject.session.flush();
+  assert.equal(subject.state().candles.length, 5);
   const first = structuredClone(subject.state().signalHistory[0]);
   assert.equal(subject.state().cycleNumber, 2);
   assert.equal(subject.state().isRunning, true);
@@ -235,5 +251,61 @@ test('reconnection and reopening UI do not create another owner or erase history
   assert.equal(subject.state().history.length, 0);
   assert.equal(subject.state().signalHistory.length, 2);
   assert.equal(subject.connections(), 2, 'one new connection only after explicit STOP/restart');
+  subject.session.stop();
+});
+
+test('learning hooks observe the existing feed, register completions and stop/reconnect without replacing five-minute cycles', async () => {
+  const events = [];
+  const subject = setup({ learning: {
+    register: (record) => events.push(['signal', record.timestamp, record.signal]),
+    observe: (point) => events.push(['price', point.timestamp]),
+    interrupt: () => events.push(['interrupt']),
+  } });
+  await subject.session.start();
+  completeCycle(subject, 1000, 0.2);
+  await subject.session.flush();
+  assert.equal(events.filter((e) => e[0] === 'price').length, 60);
+  assert.deepEqual(events.at(-1), ['signal', 301000, 'POSSÍVEL COMPRA']);
+  assert.equal(subject.state().signalHistory.length, 1);
+  assert.equal(subject.connections(), 1);
+  assert.equal(subject.clock.maxTimers, 1);
+  subject.callbacks().onStatus('RECONECTANDO');
+  assert.deepEqual(events.at(-1), ['interrupt']);
+  subject.session.stop();
+  assert.deepEqual(events.at(-1), ['interrupt']);
+  const count = events.length;
+  subject.callbacks().onPrice({ timestamp: 500000, price: 80000 });
+  assert.equal(events.length, count);
+  assert.equal(subject.closes(), 1);
+});
+
+test('real learning implementation evaluates the subsequent existing-feed quotes while collection keeps running', async () => {
+  // Unit-test-only prices and storage; never seeds production statistics.
+  const values = new Map();
+  const learning = createSignalLearningStore({
+    getItem: async (key) => values.get(key) ?? null,
+    setItem: async (key, value) => { values.set(key, value); },
+  });
+  await learning.load();
+  const subject = setup({ learning });
+  await subject.session.start();
+  completeCycle(subject, 1000, 0.2);
+  const entry = 301001;
+  subject.clock.advanceTo(entry);
+  subject.callbacks().onPrice({ timestamp: entry, price: 80000 });
+  for (let minutes = 1; minutes <= 5; minutes++) {
+    const timestamp = entry + minutes * 60000;
+    subject.clock.advanceTo(timestamp);
+    subject.callbacks().onPrice({ timestamp, price: 80000 + minutes });
+  }
+  await learning.flush();
+  await subject.session.flush();
+  const results = learning.snapshot().data;
+  assert.equal(results.recent[0].signal, 'POSSÍVEL COMPRA');
+  assert.deepEqual(results.recent[0].results.map((r) => r.status), Array(5).fill('POSITIVO'));
+  assert.equal(results.stats['POSSÍVEL COMPRA'].comparable[4].evaluated, 1);
+  assert.equal(subject.connections(), 1);
+  assert.equal(subject.state().isRunning, true);
+  assert.equal(subject.clock.maxTimers, 1);
   subject.session.stop();
 });

@@ -1,4 +1,4 @@
-import type { AnalysisResult, ChartPoint, Signal } from './analysis';
+import type { AnalysisResult, ChartPoint, OhlcCandle, Signal } from './analysis';
 import type { BinanceFeedSnapshot } from './binanceMarketData';
 
 export type SourceDirection = AnalysisResult['trend'] | 'INSUFICIENTE';
@@ -18,10 +18,16 @@ export type CrossConfirmation = Readonly<{
   windowEnd: number;
 }>;
 
-type Engine = (points: ChartPoint[], windowMs: number, now: number) => AnalysisResult;
+type Engine = (
+  points: ChartPoint[],
+  windowMs: number,
+  now: number,
+  candles?: readonly OhlcCandle[],
+) => AnalysisResult;
 const CONFIRMATION_BONUS = 10;
 const SAMPLE_MS = 5_000;
 const SOURCE_TIME_TOLERANCE_MS = 15_000;
+const CANDLE_HISTORY_LOOKBACK_MS = 5 * 60 * 1000;
 
 /** Actual observations only, same receipt clock/window and 5s sampling as Kraken.
  * One real observation immediately BEFORE the window is retained for the existing
@@ -50,14 +56,34 @@ export function binanceWindowPoints(snapshot: BinanceFeedSnapshot, windowMs: num
   return points;
 }
 
-/** Apply the exact same EXISTING engine independently to each price series.
- * Corroboration can strengthen an eligible Kraken signal, never create a signal
- * that either source's existing minimum criteria would have rejected.
+/** Return only real, already-closed Binance candles near the active window. */
+export function binanceWindowCandles(
+  snapshot: BinanceFeedSnapshot,
+  windowMs: number,
+  now: number,
+): OhlcCandle[] {
+  if (snapshot.status !== 'CONECTADO') return [];
+  const earliest = now - windowMs - CANDLE_HISTORY_LOOKBACK_MS;
+  return (snapshot.recentCandles ?? []).filter((candle) => (
+    candle.timestamp >= earliest
+    && candle.timestamp + 60_000 <= now
+  ));
+}
+
+/** Apply the same candle-evidence engine independently to each exchange.
+ * Cross-source corroboration can strengthen only signals already eligible
+ * on both feeds; it cannot override a source veto or manufacture a direction.
  */
 export function createCrossConfirmedAnalyzer(engine: Engine, getBinance: () => BinanceFeedSnapshot): Engine {
-  return (points, windowMs, now) => {
-    const kraken = engine(points, windowMs, now);
-    const binance = engine(binanceWindowPoints(getBinance(), windowMs, now), windowMs, now);
+  return (points, windowMs, now, krakenCandles = []) => {
+    const snapshot = getBinance();
+    const kraken = engine(points, windowMs, now, krakenCandles);
+    const binance = engine(
+      binanceWindowPoints(snapshot, windowMs, now),
+      windowMs,
+      now,
+      binanceWindowCandles(snapshot, windowMs, now),
+    );
     const krakenDirection: SourceDirection = kraken.dataStatus === 'SUFICIENTES' ? kraken.trend : 'INSUFICIENTE';
     const binanceDirection: SourceDirection = binance.dataStatus === 'SUFICIENTES' ? binance.trend : 'INSUFICIENTE';
     const insufficient = krakenDirection === 'INSUFICIENTE' || binanceDirection === 'INSUFICIENTE';

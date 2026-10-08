@@ -7,6 +7,30 @@ export type ChartPoint = {
   price: number;
 };
 
+/** Real exchange OHLC candle; timestamp is the start of its 1-minute interval. */
+export type OhlcCandle = Readonly<{
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}>;
+
+export type CandleDirection = 'ALTA' | 'BAIXA' | 'NEUTRA';
+
+export type CandleFeatures = Readonly<{
+  timestamp: number;
+  direction: CandleDirection;
+  bodySize: number;
+  rangeSize: number;
+  upperWick: number;
+  lowerWick: number;
+  bodyRangeRatio: number;
+  closePosition: number;
+  bodyPercent: number;
+  relativeStrength: number;
+}>;
+
 export type AnalysisResult = {
   signal: Signal;
   trend: 'ALTA' | 'BAIXA' | 'LATERAL';
@@ -14,126 +38,154 @@ export type AnalysisResult = {
   streak: number;
   slope: number;
   reason: string;
-  // Metadata only: all existing movement, coverage and signal thresholds are unchanged.
   dataStatus?: 'INSUFICIENTES' | 'COLETANDO' | 'SUFICIENTES';
   crossConfirmation?: CrossConfirmation;
 };
 
 export const DEFAULT_ANALYSIS_WINDOW_MS = 5 * 60 * 1000;
 
-const SAMPLE_INTERVAL_MS = 5 * 1000;
-const MIN_POINTS_FOR_SIGNAL = Math.ceil(DEFAULT_ANALYSIS_WINDOW_MS / SAMPLE_INTERVAL_MS / 2);
-const MAX_SAMPLE_AGE_MS = 15 * 1000;
-const MAX_SAMPLE_GAP_MS = 20 * 1000;
-const BUCKET_DURATION_MS = 30 * 1000;
-const BUCKET_BOUNDARY_TOLERANCE_MS = 15 * 1000;
-const MIN_SIGNAL_MOVE_PERCENT = 0.12;
-const MIN_TREND_MOVE_PERCENT = 0.005;
-const MIN_BUCKET_MOVE_PERCENT = 0.005;
-const MIN_PATH_EFFICIENCY = 0.55;
-const MIN_DIRECTIONAL_CONSISTENCY = 0.7;
-const MAX_COUNTERTREND_SHARE = 0.2;
-const MIN_SIGNAL_CONFIDENCE = 68;
+/**
+ * First candle-engine calibration. Evidence categories have equal weight because
+ * this project has no labelled candle-outcome dataset to justify unequal weights.
+ * Direction, reversal, coverage and cross-source checks remain independent vetoes.
+ */
+export const CANDLE_ANALYSIS_CONFIG = Object.freeze({
+  candleDurationMs: 60_000,
+  minClosedCandles: 3,
+  minCandleSpanMs: 120_000,
+  maxCandleGapMs: 120_000,
+  maxLastCandleAgeMs: 120_000,
+  maxLatestQuoteAgeMs: 15_000,
+  dojiBodyRangeMax: 0.12,
+  minDirectionalCandleShare: 0.7,
+  minTrendCandleShare: 0.6,
+  minEvidenceConfidence: 68,
+  movementReferencePercent: 0.12,
+  minTrendFit: 0.25,
+  breakoutLookbackCandles: 5,
+  reversalTailCandles: 2,
+  reversalPrecedingShare: 0.6,
+  reversalMinBodyRange: 0.45,
+  reversalLastBodyRange: 0.6,
+  evidenceWeights: Object.freeze({
+    candleDirection: 0.2,
+    candleStrength: 0.2,
+    wickBehavior: 0.2,
+    priceMovement: 0.2,
+    trendStructure: 0.2,
+  }),
+});
 
-type DirectionalSegments = {
-  aligned: number;
-  opposed: number;
-  total: number;
-  consistency: number;
+/**
+ * Last-candle thresholds are relative to the average body of candles that
+ * support the preceding direction. Penalty units use one candle's share of
+ * the existing direction evidence (20 points / five 1-minute candles).
+ */
+export const LAST_CANDLE_CALIBRATION = Object.freeze({
+  correctionMaxRelativeBody: 0.75,
+  possibleReversalMinRelativeBody: 1.5,
+  possibleReversalMinBodyRange: CANDLE_ANALYSIS_CONFIG.reversalLastBodyRange,
+  countertrendCloseExtremeShare: 0.2,
+  trendSideRejectionWickMinShare: 0.35,
+  previousMoveErasureShare: 0.5,
+  moderatePenaltyVotes: 1,
+  reversalPenaltyVotes: 2,
+});
+
+type Direction = -1 | 0 | 1;
+type LastCandleEffect = 'NENHUM' | 'CORRECAO_NORMAL' | 'PERDA_DE_FORCA' | 'POSSIVEL_REVERSAO';
+
+type CandleEvidence = {
+  candles: CandleFeatures[];
+  direction: Direction;
+  directionShare: number;
+  neutralShare: number;
+  wickScore: number;
+  strengthScore: number;
+  movementScore: number;
+  structureScore: number;
+  priceChangePercent: number;
+  trendFit: number;
+  breakoutDirection: Direction;
+  reversal: boolean;
+  lastCandleReversal: boolean;
+  lastCandleEffect: LastCandleEffect;
+  lastCandlePenaltyPoints: number;
   streak: number;
+  confidence: number;
 };
 
-function nearestPriceAt(points: ChartPoint[], timestamp: number): number | null {
-  let nearest: ChartPoint | null = null;
-  let nearestDistance = Number.POSITIVE_INFINITY;
-
-  for (const point of points) {
-    const distance = Math.abs(point.timestamp - timestamp);
-    if (distance < nearestDistance) {
-      nearest = point;
-      nearestDistance = distance;
-    }
-  }
-
-  return nearest && nearestDistance <= BUCKET_BOUNDARY_TOLERANCE_MS
-    ? nearest.price
-    : null;
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
 }
 
-function getDirectionalSegments(
-  points: ChartPoint[],
-  direction: -1 | 0 | 1,
-  windowMs: number,
-  now: number,
-  minimumMovePercent = MIN_BUCKET_MOVE_PERCENT,
-): DirectionalSegments {
-  if (points.length < 2) {
-    return { aligned: 0, opposed: 0, total: 0, consistency: 0, streak: 0 };
-  }
-
-  const firstTimestamp = Math.max(points[0].timestamp, now - windowMs);
-  const lastTimestamp = Math.min(points[points.length - 1].timestamp, now);
-  const observedSpan = lastTimestamp - firstTimestamp;
-  const segmentCount = Math.min(
-    Math.ceil(windowMs / BUCKET_DURATION_MS),
-    Math.round(observedSpan / BUCKET_DURATION_MS),
-  );
-
-  if (segmentCount <= 0) {
-    return { aligned: 0, opposed: 0, total: 0, consistency: 0, streak: 0 };
-  }
-
-  let aligned = 0;
-  let opposed = 0;
-  let streak = 0;
-  let total = 0;
-
-  for (let index = 0; index < segmentCount; index += 1) {
-    const segmentStart = firstTimestamp + (observedSpan * index) / segmentCount;
-    const segmentEnd = firstTimestamp + (observedSpan * (index + 1)) / segmentCount;
-    const startPrice = nearestPriceAt(points, segmentStart);
-    const endPrice = nearestPriceAt(points, segmentEnd);
-
-    if (startPrice === null || endPrice === null || startPrice <= 0) continue;
-
-    const changePercent = ((endPrice - startPrice) / startPrice) * 100;
-    total += 1;
-    if (changePercent * direction >= minimumMovePercent) {
-      aligned += 1;
-      streak += 1;
-    } else {
-      streak = 0;
-      if (changePercent * direction <= -minimumMovePercent) opposed += 1;
-    }
-  }
-
-  return {
-    aligned,
-    opposed,
-    total,
-    consistency: total > 0 ? aligned / total : 0,
-    streak,
-  };
+function validCandle(candle: OhlcCandle): boolean {
+  return Number.isSafeInteger(candle.timestamp)
+    && candle.timestamp >= 0
+    && [candle.open, candle.high, candle.low, candle.close]
+      .every((value) => Number.isFinite(value) && value > 0)
+    && candle.high >= Math.max(candle.open, candle.close)
+    && candle.low <= Math.min(candle.open, candle.close)
+    && candle.high >= candle.low;
 }
 
-function classifyTrend(
-  points: ChartPoint[],
-  priceChangePercent: number,
-  windowMs: number,
+/** Shared by the engine and chart so rendered candles match the analyzed OHLC. */
+export function selectClosedCandlesInWindow(
+  candles: readonly OhlcCandle[],
+  windowStart: number,
   now: number,
-): AnalysisResult['trend'] {
-  // Describing a trend is separate from authorizing a trading signal.
-  // Small, sustained moves can be directional without meeting signal thresholds.
-  if (points.length < 8 || Math.abs(priceChangePercent) < MIN_TREND_MOVE_PERCENT) return 'LATERAL';
-  const direction = priceChangePercent > 0 ? 1 : -1;
-  const segments = getDirectionalSegments(points, direction, windowMs, now, 0.0005);
-  const span = points[points.length - 1].timestamp - points[0].timestamp;
-  if (span <= 0 || segments.total < 2) return 'LATERAL';
+): OhlcCandle[] {
+  if (!Number.isFinite(windowStart) || !Number.isFinite(now) || now < windowStart) return [];
+  const unique = new Map<number, OhlcCandle>();
+  for (const candle of candles) {
+    if (validCandle(candle)
+      && candle.timestamp >= windowStart
+      && candle.timestamp + CANDLE_ANALYSIS_CONFIG.candleDurationMs <= now) {
+      unique.set(candle.timestamp, candle);
+    }
+  }
+  return [...unique.values()].sort((left, right) => left.timestamp - right.timestamp);
+}
 
-  const xs = points.map((point) => (point.timestamp - points[0].timestamp) / span);
-  const ys = points.map((point) => ((point.price - points[0].price) / points[0].price) * 100);
-  const meanX = xs.reduce((sum, x) => sum + x, 0) / xs.length;
-  const meanY = ys.reduce((sum, y) => sum + y, 0) / ys.length;
+export function analyzeCandleFeatures(
+  candle: OhlcCandle,
+  averageBodyPercent?: number,
+): CandleFeatures {
+  const rangeSize = candle.high - candle.low;
+  const bodySize = Math.abs(candle.close - candle.open);
+  const upperWick = candle.high - Math.max(candle.open, candle.close);
+  const lowerWick = Math.min(candle.open, candle.close) - candle.low;
+  const bodyRangeRatio = rangeSize > 0 ? clamp01(bodySize / rangeSize) : 0;
+  const bodyPercent = candle.open > 0 ? (bodySize / candle.open) * 100 : 0;
+  const relativeSize = averageBodyPercent && averageBodyPercent > 0
+    ? clamp01(bodyPercent / averageBodyPercent)
+    : bodyRangeRatio > 0 ? 1 : 0;
+  const direction: CandleDirection = bodyRangeRatio <= CANDLE_ANALYSIS_CONFIG.dojiBodyRangeMax
+    ? 'NEUTRA'
+    : candle.close > candle.open ? 'ALTA'
+      : candle.close < candle.open ? 'BAIXA' : 'NEUTRA';
+
+  return Object.freeze({
+    timestamp: candle.timestamp,
+    direction,
+    bodySize,
+    rangeSize,
+    upperWick: Math.max(0, upperWick),
+    lowerWick: Math.max(0, lowerWick),
+    bodyRangeRatio,
+    closePosition: rangeSize > 0 ? clamp01((candle.close - candle.low) / rangeSize) : 0.5,
+    bodyPercent,
+    relativeStrength: bodyRangeRatio * relativeSize,
+  });
+}
+
+function regressionFit(candles: readonly OhlcCandle[], direction: Direction): number {
+  if (candles.length < 2 || direction === 0) return 0;
+  const xs = candles.map((_, index) => index);
+  const base = candles[0].open;
+  const ys = candles.map((candle) => ((candle.close - base) / base) * 100);
+  const meanX = xs.reduce((sum, value) => sum + value, 0) / xs.length;
+  const meanY = ys.reduce((sum, value) => sum + value, 0) / ys.length;
   let covariance = 0;
   let varianceX = 0;
   let varianceY = 0;
@@ -144,199 +196,412 @@ function classifyTrend(
     varianceX += x * x;
     varianceY += y * y;
   }
-  const fit = varianceX > 0 && varianceY > 0
-    ? (covariance * covariance) / (varianceX * varianceY)
+  if (varianceX === 0 || varianceY === 0 || covariance * direction <= 0) return 0;
+  return clamp01((covariance * covariance) / (varianceX * varianceY));
+}
+
+function getBreakoutDirection(
+  allClosedCandles: readonly OhlcCandle[],
+  windowCandles: readonly OhlcCandle[],
+  windowStart: number,
+): Direction {
+  const count = CANDLE_ANALYSIS_CONFIG.breakoutLookbackCandles;
+  if (windowCandles.length === 0) return 0;
+  const previous = allClosedCandles
+    .filter((candle) => (
+      candle.timestamp < windowStart
+      && candle.timestamp + CANDLE_ANALYSIS_CONFIG.candleDurationMs <= windowStart
+    ))
+    .sort((left, right) => left.timestamp - right.timestamp)
+    .slice(-count);
+  if (previous.length !== count) return 0;
+  for (let index = 1; index < previous.length; index += 1) {
+    if (previous[index].timestamp - previous[index - 1].timestamp
+      !== CANDLE_ANALYSIS_CONFIG.candleDurationMs) return 0;
+  }
+
+  const priorHigh = Math.max(...previous.map((candle) => candle.high));
+  const priorLow = Math.min(...previous.map((candle) => candle.low));
+  const lastClose = windowCandles[windowCandles.length - 1].close;
+  if (lastClose > priorHigh) return 1;
+  if (lastClose < priorLow) return -1;
+  return 0;
+}
+
+function hasStrongReversal(features: readonly CandleFeatures[], direction: Direction): boolean {
+  const tailCount = CANDLE_ANALYSIS_CONFIG.reversalTailCandles;
+  if (direction === 0 || features.length < tailCount + 2) return false;
+  const preceding = features.slice(0, -tailCount);
+  const directional = preceding.filter((feature) => feature.direction !== 'NEUTRA');
+  if (directional.length < 2) return false;
+  const up = directional.filter((feature) => feature.direction === 'ALTA').length;
+  const down = directional.length - up;
+  const priorDirection: Direction = up > down ? 1 : down > up ? -1 : 0;
+  if (priorDirection === 0 || Math.max(up, down) / directional.length
+    < CANDLE_ANALYSIS_CONFIG.reversalPrecedingShare) return false;
+
+  const tail = features.slice(-tailCount);
+  return tail.every((feature) => (
+    feature.direction === (priorDirection > 0 ? 'BAIXA' : 'ALTA')
+    && feature.bodyRangeRatio >= CANDLE_ANALYSIS_CONFIG.reversalMinBodyRange
+  ));
+}
+
+function assessLastCountertrendCandle(
+  windowCandles: readonly OhlcCandle[],
+  features: readonly CandleFeatures[],
+  direction: Direction,
+  breakoutDirection: Direction,
+): { penaltyPoints: number; possibleReversal: boolean; effect: LastCandleEffect } {
+  if (direction === 0 || windowCandles.length < 2 || features.length !== windowCandles.length) {
+    return { penaltyPoints: 0, possibleReversal: false, effect: 'NENHUM' };
+  }
+
+  const expectedDirection = direction > 0 ? 'ALTA' : 'BAIXA';
+  const counterDirection = direction > 0 ? 'BAIXA' : 'ALTA';
+  const lastFeature = features[features.length - 1];
+  if (lastFeature.direction !== counterDirection) {
+    return { penaltyPoints: 0, possibleReversal: false, effect: 'NENHUM' };
+  }
+
+  const priorAlignedBodies = features.slice(0, -1)
+    .filter((feature) => feature.direction === expectedDirection)
+    .map((feature) => feature.bodyPercent);
+  const averagePriorBody = priorAlignedBodies.length > 0
+    ? priorAlignedBodies.reduce((sum, value) => sum + value, 0) / priorAlignedBodies.length
     : 0;
-  const consistent = covariance * direction > 0
-    && fit >= 0.5
-    && segments.consistency >= 0.6
-    && segments.opposed / segments.total <= 0.3;
-  return consistent ? (direction > 0 ? 'ALTA' : 'BAIXA') : 'LATERAL';
+  if (averagePriorBody <= 0) return { penaltyPoints: 0, possibleReversal: false, effect: 'NENHUM' };
+
+  const relativeBody = lastFeature.bodyPercent / averagePriorBody;
+  const trendSideWick = direction > 0 ? lastFeature.lowerWick : lastFeature.upperWick;
+  const trendSideWickShare = lastFeature.rangeSize > 0
+    ? trendSideWick / lastFeature.rangeSize
+    : 0;
+  const hasStrongRejection = trendSideWickShare
+      >= LAST_CANDLE_CALIBRATION.trendSideRejectionWickMinShare
+    && (direction > 0
+      ? lastFeature.closePosition > LAST_CANDLE_CALIBRATION.countertrendCloseExtremeShare
+      : lastFeature.closePosition < 1 - LAST_CANDLE_CALIBRATION.countertrendCloseExtremeShare);
+
+  // A small body or a clear rejection wick is treated as an ordinary correction.
+  if (relativeBody < LAST_CANDLE_CALIBRATION.correctionMaxRelativeBody || hasStrongRejection) {
+    return { penaltyPoints: 0, possibleReversal: false, effect: 'CORRECAO_NORMAL' };
+  }
+
+  const votePoints = 100 * CANDLE_ANALYSIS_CONFIG.evidenceWeights.candleDirection
+    / (DEFAULT_ANALYSIS_WINDOW_MS / CANDLE_ANALYSIS_CONFIG.candleDurationMs);
+  const moderatePenalty = Math.round(votePoints * LAST_CANDLE_CALIBRATION.moderatePenaltyVotes);
+  const strongEnough = relativeBody >= LAST_CANDLE_CALIBRATION.possibleReversalMinRelativeBody
+    && lastFeature.bodyRangeRatio >= LAST_CANDLE_CALIBRATION.possibleReversalMinBodyRange;
+  if (!strongEnough) {
+    return { penaltyPoints: moderatePenalty, possibleReversal: false, effect: 'PERDA_DE_FORCA' };
+  }
+
+  const lastCandle = windowCandles[windowCandles.length - 1];
+  const previousCandle = windowCandles[windowCandles.length - 2];
+  const closesAtCountertrendExtreme = direction > 0
+    ? lastFeature.closePosition <= LAST_CANDLE_CALIBRATION.countertrendCloseExtremeShare
+    : lastFeature.closePosition >= 1 - LAST_CANDLE_CALIBRATION.countertrendCloseExtremeShare;
+  const breaksPreviousCandle = direction > 0
+    ? lastCandle.close < previousCandle.low
+    : lastCandle.close > previousCandle.high;
+  const previousFavorableMovePercent = direction
+    * ((previousCandle.close - windowCandles[0].open) / windowCandles[0].open) * 100;
+  const erasesSignificantMove = previousFavorableMovePercent > 0
+    && lastFeature.bodyPercent / previousFavorableMovePercent
+      >= LAST_CANDLE_CALIBRATION.previousMoveErasureShare;
+  const oppositeBreakout = breakoutDirection === -direction;
+  const possibleReversal = closesAtCountertrendExtreme
+    && (breaksPreviousCandle || erasesSignificantMove || oppositeBreakout);
+
+  return {
+    penaltyPoints: possibleReversal
+      ? Math.round(votePoints * LAST_CANDLE_CALIBRATION.reversalPenaltyVotes)
+      : moderatePenalty,
+    possibleReversal,
+    effect: possibleReversal ? 'POSSIVEL_REVERSAO' : 'PERDA_DE_FORCA',
+  };
+}
+
+function trailingDirectionStreak(features: readonly CandleFeatures[], direction: Direction): number {
+  if (direction === 0) return 0;
+  let streak = 0;
+  for (let index = features.length - 1; index >= 0; index -= 1) {
+    const aligned = features[index].direction === (direction > 0 ? 'ALTA' : 'BAIXA');
+    if (!aligned) break;
+    streak += 1;
+  }
+  return streak;
+}
+
+function calculateCandleEvidence(
+  windowCandles: readonly OhlcCandle[],
+  allClosedCandles: readonly OhlcCandle[],
+  windowStart: number,
+): CandleEvidence {
+  const first = windowCandles[0];
+  const last = windowCandles[windowCandles.length - 1];
+  const priceChangePercent = first && last
+    ? ((last.close - first.open) / first.open) * 100
+    : 0;
+  const directionVotes = windowCandles.reduce((sum, candle) => (
+    sum + (candle.close > candle.open ? 1 : candle.close < candle.open ? -1 : 0)
+  ), 0);
+  const direction: Direction = priceChangePercent > 0 ? 1
+    : priceChangePercent < 0 ? -1
+      : directionVotes > 0 ? 1 : directionVotes < 0 ? -1 : 0;
+  const averageBodyPercent = windowCandles.length > 0
+    ? windowCandles.reduce((sum, candle) => sum + Math.abs(candle.close - candle.open) / candle.open * 100, 0)
+      / windowCandles.length
+    : 0;
+  const features = windowCandles.map((candle) => analyzeCandleFeatures(candle, averageBodyPercent));
+  const alignedDirection = direction > 0 ? 'ALTA' : direction < 0 ? 'BAIXA' : null;
+  const aligned = alignedDirection
+    ? features.filter((feature) => feature.direction === alignedDirection)
+    : [];
+  const neutralShare = features.length > 0
+    ? features.filter((feature) => feature.direction === 'NEUTRA').length / features.length
+    : 1;
+  const directionShare = features.length > 0 ? aligned.length / features.length : 0;
+  const strengthScore = aligned.length > 0
+    ? aligned.reduce((sum, feature) => sum + feature.relativeStrength, 0) / aligned.length
+    : 0;
+  const wickScore = aligned.length > 0
+    ? aligned.reduce((sum, feature) => {
+        const opposingWick = direction > 0 ? feature.upperWick : feature.lowerWick;
+        const opposingWickShare = feature.rangeSize > 0 ? opposingWick / feature.rangeSize : 0;
+        const closeSupport = direction > 0 ? feature.closePosition : 1 - feature.closePosition;
+        return sum + clamp01((1 - opposingWickShare + closeSupport) / 2);
+      }, 0) / aligned.length
+    : 0;
+  const movementScore = clamp01(
+    Math.abs(priceChangePercent) / CANDLE_ANALYSIS_CONFIG.movementReferencePercent,
+  );
+  const trendFit = regressionFit(windowCandles, direction);
+  const half = Math.ceil(features.length / 2);
+  const firstHalf = features.slice(0, half);
+  const secondHalf = features.slice(half);
+  const signedBodyPercent = (feature: CandleFeatures) => (
+    (feature.direction === 'ALTA' ? 1 : feature.direction === 'BAIXA' ? -1 : 0)
+      * feature.bodyPercent * direction
+  );
+  const mean = (values: readonly CandleFeatures[]) => values.length > 0
+    ? values.reduce((sum, feature) => sum + signedBodyPercent(feature), 0) / values.length
+    : 0;
+  const avgBody = features.length > 0
+    ? features.reduce((sum, feature) => sum + feature.bodyPercent, 0) / features.length
+    : 0;
+  const bodyMomentum = avgBody > 0
+    ? clamp01(0.5 + (mean(secondHalf) - mean(firstHalf)) / (2 * avgBody))
+    : 0.5;
+  const breakoutDirection = getBreakoutDirection(allClosedCandles, windowCandles, windowStart);
+  const structureParts = [trendFit, bodyMomentum];
+  if (breakoutDirection !== 0) structureParts.push(breakoutDirection === direction ? 1 : 0);
+  const structureScore = structureParts.reduce((sum, value) => sum + value, 0) / structureParts.length;
+  const weights = CANDLE_ANALYSIS_CONFIG.evidenceWeights;
+  const baseConfidence = Math.round(100 * (
+    directionShare * weights.candleDirection
+    + strengthScore * weights.candleStrength
+    + wickScore * weights.wickBehavior
+    + movementScore * weights.priceMovement
+    + structureScore * weights.trendStructure
+  ));
+  const lastCountertrend = assessLastCountertrendCandle(
+    windowCandles,
+    features,
+    direction,
+    breakoutDirection,
+  );
+  const confidence = Math.max(0, baseConfidence - lastCountertrend.penaltyPoints);
+
+  return {
+    candles: features,
+    direction,
+    directionShare,
+    neutralShare,
+    wickScore,
+    strengthScore,
+    movementScore,
+    structureScore,
+    priceChangePercent,
+    trendFit,
+    breakoutDirection,
+    reversal: hasStrongReversal(features, direction) || lastCountertrend.possibleReversal,
+    lastCandleReversal: lastCountertrend.possibleReversal,
+    lastCandleEffect: lastCountertrend.effect,
+    lastCandlePenaltyPoints: lastCountertrend.penaltyPoints,
+    streak: trailingDirectionStreak(features, direction),
+    confidence,
+  };
+}
+
+function waitResult(
+  reason: string,
+  dataStatus: NonNullable<AnalysisResult['dataStatus']>,
+  evidence?: CandleEvidence,
+): AnalysisResult {
+  return {
+    signal: 'AGUARDAR',
+    trend: evidence?.direction === 1 ? 'ALTA' : evidence?.direction === -1 ? 'BAIXA' : 'LATERAL',
+    confidence: evidence?.confidence ?? 0,
+    streak: evidence?.streak ?? 0,
+    slope: evidence?.priceChangePercent ?? 0,
+    reason,
+    dataStatus,
+  };
+}
+
+function lastCandleNote(evidence: CandleEvidence): string {
+  if (evidence.lastCandleEffect === 'CORRECAO_NORMAL') {
+    return ' O último candle contrário foi tratado como correção normal, sem penalidade adicional.';
+  }
+  if (evidence.lastCandleEffect === 'PERDA_DE_FORCA') {
+    return ` O último candle contrário reduziu ${evidence.lastCandlePenaltyPoints} pontos por perda de força.`;
+  }
+  return '';
 }
 
 export function analyzeChart(
   points: ChartPoint[],
   windowMs = DEFAULT_ANALYSIS_WINDOW_MS,
   now = points[points.length - 1]?.timestamp ?? 0,
+  candles: readonly OhlcCandle[] = [],
 ): AnalysisResult {
   const validPoints = points
-    .filter((point) => (
-      Number.isFinite(point.timestamp)
-      && Number.isFinite(point.price)
-      && point.price > 0
-      && point.timestamp <= now
-    ))
+    .filter((point) => Number.isFinite(point.timestamp)
+      && Number.isFinite(point.price) && point.price > 0 && point.timestamp <= now)
     .sort((left, right) => left.timestamp - right.timestamp)
     .filter((point, index, sorted) => index === 0 || point.timestamp > sorted[index - 1].timestamp);
 
   if (validPoints.length === 0) {
-    return {
-      signal: 'AGUARDAR',
-      trend: 'LATERAL',
-      confidence: 0,
-      streak: 0,
-      slope: 0,
-      reason: 'Aguardando a primeira cotação real de BTC/USD.',
-      dataStatus: 'INSUFICIENTES',
-    };
+    return waitResult('Aguardando a primeira cotação real para iniciar o ciclo de 5 minutos.', 'INSUFICIENTES');
   }
 
   const elapsed = Math.max(0, now - validPoints[0].timestamp);
   const windowStart = now - windowMs;
-  const windowPoints = validPoints.filter((point) => point.timestamp >= windowStart);
-
-  if (windowPoints.length === 0) {
-    return {
-      signal: 'AGUARDAR',
-      trend: 'LATERAL',
-      confidence: 0,
-      streak: 0,
-      slope: 0,
-      reason: 'Sem cotações recentes suficientes para avaliar a janela de 5 minutos.',
-      dataStatus: 'INSUFICIENTES',
-    };
-  }
-
-  const firstPrice = windowPoints[0].price;
-  const latestPoint = windowPoints[windowPoints.length - 1];
-  const latestPrice = latestPoint.price;
-  const priceChangePercent = firstPrice > 0 ? ((latestPrice - firstPrice) / firstPrice) * 100 : 0;
-  const deltas = windowPoints.slice(1).map((point, index) => {
-    const previousPrice = windowPoints[index].price;
-    return previousPrice > 0 ? ((point.price - previousPrice) / previousPrice) * 100 : 0;
-  });
-  const direction: -1 | 0 | 1 = priceChangePercent > 0
-    ? 1
-    : priceChangePercent < 0
-      ? -1
-      : 0;
-  const segments = getDirectionalSegments(windowPoints, direction, windowMs, now);
-  const latestSampleAge = Math.max(0, now - latestPoint.timestamp);
-  const observedSpan = latestPoint.timestamp - windowPoints[0].timestamp;
-  const maxSampleGap = windowPoints.slice(1).reduce(
-    (largest, point, index) => Math.max(largest, point.timestamp - windowPoints[index].timestamp),
-    0,
-  );
-  const totalMovement = deltas.reduce((sum, delta) => sum + Math.abs(delta), 0);
-  const pathEfficiency = totalMovement > 0
-    ? Math.min(1, Math.abs(priceChangePercent) / totalMovement)
-    : 0;
-  const movementStrength = Math.min(1, Math.abs(priceChangePercent) / 0.3);
-  const rawConfidence = (
-    movementStrength * 0.4
-    + pathEfficiency * 0.3
-    + segments.consistency * 0.3
-  ) * 100;
-  const trend = classifyTrend(windowPoints, priceChangePercent, windowMs, now);
   const fullWindowCollected = elapsed >= windowMs;
-  const requiredSegmentCount = Math.max(1, Math.ceil(windowMs / BUCKET_DURATION_MS) - 1);
-  const fullWindowDataQuality = Math.min(
-    1,
-    windowPoints.length / MIN_POINTS_FOR_SIGNAL,
-    observedSpan / Math.max(1, windowMs - 2 * MAX_SAMPLE_AGE_MS),
-    MAX_SAMPLE_AGE_MS / Math.max(latestSampleAge, MAX_SAMPLE_AGE_MS),
-    MAX_SAMPLE_GAP_MS / Math.max(maxSampleGap, MAX_SAMPLE_GAP_MS),
-    MAX_SAMPLE_AGE_MS / Math.max(windowPoints[0].timestamp - windowStart, MAX_SAMPLE_AGE_MS),
-    segments.total / requiredSegmentCount,
-  );
-  const confidence = Math.round(rawConfidence * (fullWindowCollected ? fullWindowDataQuality : 1));
-  const resultBase = {
-    dataStatus: 'SUFICIENTES' as const,
-    trend,
-    confidence,
-    streak: segments.streak,
-    slope: priceChangePercent,
-  };
+  const closedCandles = [...new Map(candles
+    .filter((candle) => validCandle(candle)
+      && candle.timestamp + CANDLE_ANALYSIS_CONFIG.candleDurationMs <= now)
+    .map((candle) => [candle.timestamp, candle])).values()]
+    .sort((left, right) => left.timestamp - right.timestamp);
+  const windowCandles = selectClosedCandlesInWindow(closedCandles, windowStart, now);
+  const evidence = calculateCandleEvidence(windowCandles, closedCandles, windowStart);
+  const elapsedSeconds = Math.floor(elapsed / 1000);
+  const collected = `${Math.floor(elapsedSeconds / 60)}:${String(elapsedSeconds % 60).padStart(2, '0')}`;
 
   if (!fullWindowCollected) {
-    const elapsedSeconds = Math.floor(elapsed / 1000);
-    const elapsedMinutes = Math.floor(elapsedSeconds / 60);
-    const remainingSeconds = elapsedSeconds % 60;
-    const collected = `${elapsedMinutes}:${String(remainingSeconds).padStart(2, '0')}`;
+    return waitResult(
+      `Coletando dados reais: ${collected} de ${Math.ceil(windowMs / 60000)}:00; a decisão final aguarda o ciclo completo e candles de 1 minuto fechados.`,
+      'COLETANDO',
+      evidence,
+    );
+  }
+
+  // Quotes still establish that each source is live; the signal itself is
+  // computed from OHLC, not these price samples.
+  const latestQuote = validPoints[validPoints.length - 1];
+  if (now - latestQuote.timestamp > CANDLE_ANALYSIS_CONFIG.maxLatestQuoteAgeMs) {
+    return waitResult(
+      'Cotação da fonte desatualizada; não é seguro confirmar o sinal sem uma conexão ao vivo.',
+      'INSUFICIENTES',
+      evidence,
+    );
+  }
+
+  const { minClosedCandles, minCandleSpanMs, maxCandleGapMs, maxLastCandleAgeMs } = CANDLE_ANALYSIS_CONFIG;
+  if (windowCandles.length < minClosedCandles) {
+    return waitResult(
+      `Dados OHLC insuficientes: ${windowCandles.length} candles de 1 minuto fechados; são necessários pelo menos ${minClosedCandles}.`,
+      'INSUFICIENTES',
+      evidence,
+    );
+  }
+
+  const firstCandle = windowCandles[0];
+  const latestCandle = windowCandles[windowCandles.length - 1];
+  const candleSpan = latestCandle.timestamp - firstCandle.timestamp;
+  const largestCandleGap = windowCandles.slice(1).reduce(
+    (largest, candle, index) => Math.max(largest, candle.timestamp - windowCandles[index].timestamp),
+    0,
+  );
+  const latestCandleAge = now - (latestCandle.timestamp + CANDLE_ANALYSIS_CONFIG.candleDurationMs);
+  if (candleSpan < minCandleSpanMs
+    || largestCandleGap > maxCandleGapMs
+    || latestCandleAge > maxLastCandleAgeMs) {
+    const problems = [
+      candleSpan < minCandleSpanMs ? 'cobertura OHLC curta' : null,
+      largestCandleGap > maxCandleGapMs ? 'lacuna de candles' : null,
+      latestCandleAge > maxLastCandleAgeMs ? 'último candle fechado desatualizado' : null,
+    ].filter(Boolean).join('; ');
+    return waitResult(`Dados OHLC insuficientes na janela: ${problems}.`, 'INSUFICIENTES', evidence);
+  }
+
+  if (evidence.direction === 0) {
+    return waitResult('Candles sem direção predominante; AGUARDAR.', 'SUFICIENTES', evidence);
+  }
+
+  const trend = evidence.direction === 1 ? 'ALTA' : 'BAIXA';
+  const alignedLabel = `${Math.round(evidence.directionShare * 100)}% dos candles alinhados`;
+  if (evidence.reversal) {
     return {
-      signal: 'AGUARDAR',
-      ...resultBase,
-      reason: `Coletando preços reais: ${collected} de ${Math.ceil(windowMs / 60000)}:00 antes de avaliar um sinal.`,
-      dataStatus: 'COLETANDO',
+      signal: 'AGUARDAR', trend, confidence: evidence.confidence, streak: evidence.streak,
+      slope: evidence.priceChangePercent, dataStatus: 'SUFICIENTES',
+      reason: evidence.lastCandleReversal
+        ? 'Último candle contrário forte, com fechamento extremo e rompimento ou retração estrutural; possível reversão. AGUARDAR.'
+        : 'Dois candles fortes no fim da janela indicam possível reversão. AGUARDAR.',
+    };
+  }
+  if (evidence.breakoutDirection !== 0 && evidence.breakoutDirection !== evidence.direction) {
+    return {
+      signal: 'AGUARDAR', trend, confidence: evidence.confidence, streak: evidence.streak,
+      slope: evidence.priceChangePercent, dataStatus: 'SUFICIENTES',
+      reason: 'Rompimento recente contrário à direção predominante dos candles. AGUARDAR.',
+    };
+  }
+  if (evidence.directionShare < CANDLE_ANALYSIS_CONFIG.minTrendCandleShare
+    || evidence.trendFit < CANDLE_ANALYSIS_CONFIG.minTrendFit) {
+    return {
+      signal: 'AGUARDAR', trend: 'LATERAL', confidence: evidence.confidence, streak: evidence.streak,
+      slope: evidence.priceChangePercent, dataStatus: 'SUFICIENTES',
+      reason: 'A sequência de candles não sustenta uma tendência estável. AGUARDAR.',
+    };
+  }
+  if (evidence.directionShare < CANDLE_ANALYSIS_CONFIG.minDirectionalCandleShare) {
+    return {
+      signal: 'AGUARDAR', trend, confidence: evidence.confidence, streak: evidence.streak,
+      slope: evidence.priceChangePercent, dataStatus: 'SUFICIENTES',
+      reason: `Sequência indecisa: ${alignedLabel}; direção mínima necessária ${Math.round(CANDLE_ANALYSIS_CONFIG.minDirectionalCandleShare * 100)}%. AGUARDAR.`,
+    };
+  }
+  if (evidence.neutralShare >= 0.5) {
+    return {
+      signal: 'AGUARDAR', trend, confidence: evidence.confidence, streak: evidence.streak,
+      slope: evidence.priceChangePercent, dataStatus: 'SUFICIENTES',
+      reason: 'Muitos candles neutros/doji indicam indecisão. AGUARDAR.',
+    };
+  }
+  if (evidence.confidence < CANDLE_ANALYSIS_CONFIG.minEvidenceConfidence) {
+    return {
+      signal: 'AGUARDAR', trend, confidence: evidence.confidence, streak: evidence.streak,
+      slope: evidence.priceChangePercent, dataStatus: 'SUFICIENTES',
+      reason: `Evidência dos candles em ${evidence.confidence}%, abaixo do limite de ${CANDLE_ANALYSIS_CONFIG.minEvidenceConfidence}%.${lastCandleNote(evidence)} AGUARDAR.`,
     };
   }
 
-  const dataIssues: string[] = [];
-
-  if (windowPoints.length < MIN_POINTS_FOR_SIGNAL) {
-    dataIssues.push(`apenas ${windowPoints.length} amostras`);
-  }
-  if (windowPoints[0].timestamp - windowStart > MAX_SAMPLE_AGE_MS) {
-    dataIssues.push('início da janela sem cobertura');
-  }
-  if (latestSampleAge > MAX_SAMPLE_AGE_MS) {
-    dataIssues.push('cotação mais recente desatualizada');
-  }
-  if (observedSpan < windowMs - 2 * MAX_SAMPLE_AGE_MS) {
-    dataIssues.push('cobertura temporal insuficiente');
-  }
-  if (maxSampleGap > MAX_SAMPLE_GAP_MS) {
-    dataIssues.push('lacuna longa entre cotações');
-  }
-  if (segments.total < Math.ceil(windowMs / BUCKET_DURATION_MS) - 1) {
-    dataIssues.push('consistência temporal não pôde ser medida');
-  }
-
-  if (dataIssues.length > 0) {
-    return {
-      signal: 'AGUARDAR',
-      ...resultBase,
-      reason: `Dados insuficientes na janela de 5 minutos (${dataIssues.join('; ')}).`,
-      dataStatus: 'INSUFICIENTES',
-    };
-  }
-
-  if (trend === 'LATERAL') {
-    return {
-      signal: 'AGUARDAR',
-      ...resultBase,
-      reason: `Variação de ${Math.abs(priceChangePercent).toFixed(2)}% na janela de 5 minutos; tendência inconsistente ou sem direção clara. AGUARDAR.`,
-    };
-  }
-
-  const consistencyLabel = `${segments.aligned}/${segments.total} períodos`;
-  const countertrendLabel = `${segments.opposed}/${segments.total} contra`;
-  const movementLabel = `${Math.abs(priceChangePercent).toFixed(2)}%`;
-  const signalIssues: string[] = [];
-
-  if (Math.abs(priceChangePercent) < MIN_SIGNAL_MOVE_PERCENT) {
-    signalIssues.push(`variação de ${movementLabel} abaixo do mínimo de ${MIN_SIGNAL_MOVE_PERCENT.toFixed(2)}%`);
-  }
-  if (
-    segments.consistency < MIN_DIRECTIONAL_CONSISTENCY
-    || segments.opposed / segments.total > MAX_COUNTERTREND_SHARE
-  ) {
-    signalIssues.push(`tendência inconsistente (${consistencyLabel} na direção, ${countertrendLabel})`);
-  }
-  if (pathEfficiency < MIN_PATH_EFFICIENCY) {
-    signalIssues.push(`trajetória irregular (${Math.round(pathEfficiency * 100)}% de eficiência)`);
-  }
-  if (segments.streak === 0) {
-    signalIssues.push('fim da janela não confirma a direção geral');
-  }
-  if (confidence < MIN_SIGNAL_CONFIDENCE) {
-    signalIssues.push(`força agregada de ${confidence}% abaixo do mínimo de ${MIN_SIGNAL_CONFIDENCE}%`);
-  }
-
-  if (signalIssues.length > 0) {
-    return {
-      signal: 'AGUARDAR',
-      ...resultBase,
-      reason: `Movimento de ${movementLabel}, mas ${signalIssues.slice(0, 2).join('; ')}. AGUARDAR.`,
-    };
-  }
-
-  const signal = direction > 0 ? 'POSSÍVEL COMPRA' : 'POSSÍVEL VENDA';
-  const movementVerb = direction > 0 ? 'subiu' : 'caiu';
+  const signal = evidence.direction > 0 ? 'POSSÍVEL COMPRA' : 'POSSÍVEL VENDA';
+  const movement = `${Math.abs(evidence.priceChangePercent).toFixed(3)}%`;
+  const breakoutNote = evidence.breakoutDirection === evidence.direction
+    ? ' rompimento confirmado na direção'
+    : '';
   return {
     signal,
-    ...resultBase,
-    reason: `BTC/USD ${movementVerb} ${movementLabel} em 5 min; ${consistencyLabel} na direção e ${Math.round(pathEfficiency * 100)}% de eficiência. Confirmação mede a força dos sinais, não a chance de acerto.`,
+    trend,
+    confidence: evidence.confidence,
+    streak: evidence.streak,
+    slope: evidence.priceChangePercent,
+    dataStatus: 'SUFICIENTES',
+    reason: `${windowCandles.length} candles fechados: ${alignedLabel}, movimento de ${movement}${breakoutNote}; evidência composta ${evidence.confidence}%.${lastCandleNote(evidence)} Confirmação mede força da evidência, não probabilidade de acerto.`,
   };
 }
 
@@ -380,11 +645,7 @@ export function scheduleAnalysisDeadline(
     onComplete(completedAt);
   };
 
-  timer = scheduler.setTimeout(
-    checkDeadline,
-    Math.max(0, completedAt - scheduler.now()),
-  );
-
+  timer = scheduler.setTimeout(checkDeadline, Math.max(0, completedAt - scheduler.now()));
   return () => {
     cancelled = true;
     scheduler.clearTimeout(timer);

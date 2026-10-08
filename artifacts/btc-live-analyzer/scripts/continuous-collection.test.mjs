@@ -33,18 +33,38 @@ class Clock {
 function setup() {
   const clock = new Clock();
   const completed = [];
+  let currentCandles = [];
   let state;
   const collector = createContinuousCollection({
     windowMs: DEFAULT_ANALYSIS_WINDOW_MS,
     onUpdate: (next) => { state = next; },
     onComplete: (points, completedAt) => {
-      completed.push({ points, completedAt, result: analyzeChart([...points], DEFAULT_ANALYSIS_WINDOW_MS, completedAt) });
+      completed.push({
+        points, completedAt,
+        result: analyzeChart([...points], DEFAULT_ANALYSIS_WINDOW_MS, completedAt, currentCandles),
+      });
     },
   }, clock);
-  return { clock, collector, completed, state: () => state };
+  return { clock, collector, completed, state: () => state, setCandles: (candles) => { currentCandles = candles; } };
+}
+
+function candleFixture(start, change) {
+  let price = 80_000;
+  return Array.from({ length: 5 }, (_, index) => {
+    const open = price;
+    const close = open * (1 + change / 5 / 100);
+    const wick = open * 0.00001;
+    const candle = {
+      timestamp: start + index * 60_000,
+      open, high: Math.max(open, close) + wick, low: Math.min(open, close) - wick, close,
+    };
+    price = close;
+    return candle;
+  });
 }
 
 function feedCycle(subject, start, change = 0.2) {
+  subject.setCandles(candleFixture(start, change));
   for (let index = 0; index < 60; index += 1) {
     const timestamp = start + index * 5000;
     subject.clock.advanceTo(timestamp);

@@ -1,4 +1,4 @@
-import type { ChartPoint, AnalysisResult } from './analysis';
+import type { ChartPoint, OhlcCandle, AnalysisResult } from './analysis';
 import type { AnalysisRecord, mergeAnalysisHistory } from './analysisHistory';
 import type { MarketFeedConnection, MarketFeedStatus, MarketPricePoint } from './marketData';
 
@@ -6,6 +6,7 @@ export type AnalysisSessionSnapshot = {
   isRunning: boolean;
   marketStatus: MarketFeedStatus;
   history: ChartPoint[];
+  candles: OhlcCandle[];
   collectionStartedAt: number | null;
   clockNow: number;
   cycleNumber: number;
@@ -25,7 +26,12 @@ type Collection = {
 
 type SessionDependencies = {
   windowMs: number;
-  analyze: (points: ChartPoint[], windowMs: number, now: number) => AnalysisResult;
+  analyze: (
+    points: ChartPoint[],
+    windowMs: number,
+    now: number,
+    candles?: readonly OhlcCandle[],
+  ) => AnalysisResult;
   createCollection: (callbacks: {
     windowMs: number;
     onUpdate: (state: { startedAt: number | null; now: number; cycleNumber: number; points: ChartPoint[] }) => void;
@@ -33,6 +39,7 @@ type SessionDependencies = {
   }) => Collection;
   connect: (callbacks: {
     onPrice: (point: MarketPricePoint) => void;
+    onCandle: (candle: OhlcCandle) => void;
     onStatus: (status: MarketFeedStatus) => void;
     onError: (message: string) => void;
   }) => MarketFeedConnection;
@@ -43,6 +50,11 @@ type SessionDependencies = {
     subscribe?: (listener: (records: AnalysisRecord[]) => void) => () => void;
   };
   notify: (record: AnalysisRecord) => Promise<void>;
+  learning?: {
+    register: (record: AnalysisRecord) => void;
+    observe: (point: MarketPricePoint) => void;
+    interrupt: () => void;
+  };
   publish: (state: AnalysisSessionSnapshot) => void;
 };
 
@@ -54,7 +66,7 @@ export function createAnalysisSession(dependencies: SessionDependencies) {
   let generation = 0;
   let feed: MarketFeedConnection | null = null;
   let state: AnalysisSessionSnapshot = {
-    isRunning: false, marketStatus: 'DESATIVADA', history: [],
+    isRunning: false, marketStatus: 'DESATIVADA', history: [], candles: [],
     collectionStartedAt: null, clockNow: 0, cycleNumber: 1,
     currentPrice: null, lastPriceAt: null, signalHistory: [],
     completedCycle: null, error: null,
@@ -62,7 +74,12 @@ export function createAnalysisSession(dependencies: SessionDependencies) {
   let saving: Promise<void> = Promise.resolve();
   let unsubscribeHistory: (() => void) | null = null;
   function publish() {
-    dependencies.publish({ ...state, history: [...state.history], signalHistory: [...state.signalHistory] });
+    dependencies.publish({
+      ...state,
+      history: [...state.history],
+      candles: [...state.candles],
+      signalHistory: [...state.signalHistory],
+    });
   }
   const collection = dependencies.createCollection({
     windowMs: dependencies.windowMs,
@@ -72,12 +89,18 @@ export function createAnalysisSession(dependencies: SessionDependencies) {
       publish();
     },
     onComplete: (points, completedAt) => {
-      const result = dependencies.analyze([...points], dependencies.windowMs, completedAt);
+      const result = dependencies.analyze(
+        [...points],
+        dependencies.windowMs,
+        completedAt,
+        [...state.candles],
+      );
       const record: AnalysisRecord = {
         timestamp: completedAt, signal: result.signal, direction: result.trend,
         confidence: result.confidence, durationMs: dependencies.windowMs, reason: result.reason,
         ...(result.crossConfirmation ? { crossConfirmation: result.crossConfirmation } : {}),
       };
+      dependencies.learning?.register(record);
       state = { ...state, completedCycle: record, signalHistory: dependencies.store.merge(state.signalHistory, [record]) };
       publish();
       const currentGeneration = generation;
@@ -136,11 +159,22 @@ export function createAnalysisSession(dependencies: SessionDependencies) {
           if (!state.isRunning || token !== generation) return;
           state = { ...state, currentPrice: point.price, lastPriceAt: point.timestamp };
           collection.push(point);
+          dependencies.learning?.observe(point);
+        },
+        onCandle: (candle) => {
+          if (!state.isRunning || token !== generation) return;
+          const nextCandles = [
+            ...state.candles.filter((item) => item.timestamp !== candle.timestamp),
+            { ...candle },
+          ].sort((left, right) => left.timestamp - right.timestamp).slice(-60);
+          state = { ...state, candles: nextCandles };
+          publish();
         },
         onStatus: (status) => {
           if (!state.isRunning || token !== generation) return;
           state = { ...state, marketStatus: status };
           if (status === 'RECONECTANDO') {
+            dependencies.learning?.interrupt();
             state = { ...state, currentPrice: null, lastPriceAt: null };
             collection.reconnect();
           }
@@ -154,6 +188,7 @@ export function createAnalysisSession(dependencies: SessionDependencies) {
       });
     },
     stop: () => {
+      dependencies.learning?.interrupt();
       ++generation;
       unsubscribeHistory?.();
       unsubscribeHistory = null;

@@ -7,6 +7,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.media.AudioAttributes
+import android.media.RingtoneManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.facebook.react.HeadlessJsTaskService
@@ -149,7 +151,15 @@ class BtcAnalysisService : HeadlessJsTaskService() {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         val manager = notificationManager(context)
         manager.createNotificationChannel(NotificationChannel(RUNNING_CHANNEL, "Análise BTC em execução", NotificationManager.IMPORTANCE_LOW))
-        manager.createNotificationChannel(NotificationChannel(RESULT_CHANNEL, "Resultados dos ciclos BTC", NotificationManager.IMPORTANCE_DEFAULT))
+        manager.createNotificationChannel(
+          NotificationChannel(RESULT_CHANNEL, "Resultados dos ciclos BTC", NotificationManager.IMPORTANCE_DEFAULT).apply {
+            description = "Resultados da análise; independente da notificação permanente do serviço."
+            setSound(
+              RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION),
+              AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION).build()
+            )
+          }
+        )
       }
     }
 
@@ -158,8 +168,24 @@ class BtcAnalysisService : HeadlessJsTaskService() {
       return PendingIntent.getActivity(context, 1, launch, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
 
-    @Synchronized fun notifyCycle(context: Context, title: String, body: String, token: Long) {
+    @Synchronized fun notifyCycle(context: Context, title: String, body: String, publicBody: String, token: Long) {
       if (!active || token != runToken) return
+      postResultNotification(context, title, body, publicBody)
+    }
+
+    @Synchronized fun notifyResult(context: Context, title: String, body: String, publicBody: String) {
+      if (!active) return
+      postResultNotification(context, title, body, publicBody)
+    }
+
+    private fun postResultNotification(context: Context, title: String, body: String, publicBody: String) {
+      val publicVersion = NotificationCompat.Builder(context, RESULT_CHANNEL)
+        .setSmallIcon(android.R.drawable.ic_dialog_info)
+        .setContentTitle("BTC Live Analyzer")
+        .setContentText(publicBody)
+        .setCategory(NotificationCompat.CATEGORY_STATUS)
+        .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+        .build()
       val notification = NotificationCompat.Builder(context, RESULT_CHANNEL)
         .setSmallIcon(android.R.drawable.ic_dialog_info)
         .setContentTitle(title)
@@ -167,6 +193,10 @@ class BtcAnalysisService : HeadlessJsTaskService() {
         .setStyle(NotificationCompat.BigTextStyle().bigText(body))
         .setContentIntent(openApp(context))
         .setAutoCancel(true)
+        .setDefaults(NotificationCompat.DEFAULT_ALL)
+        .setCategory(NotificationCompat.CATEGORY_STATUS)
+        .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+        .setPublicVersion(publicVersion)
         .build()
       notificationManager(context).notify(RESULT_ID, notification)
     }

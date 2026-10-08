@@ -13,7 +13,7 @@ for (const scenario of ANALYSIS_SCENARIOS) {
   test(`internal ${scenario} scenario uses the real engine and returns ${expectedSignals[scenario]}`, () => {
     const input = createAnalysisScenario(scenario, DEFAULT_ANALYSIS_WINDOW_MS);
     const original = structuredClone(input);
-    const result = analyzeChart(input.points, input.windowMs, input.now);
+    const result = analyzeChart(input.points, input.windowMs, input.now, input.candles);
     assert.equal(result.trend, scenario);
     assert.equal(result.signal, expectedSignals[scenario]);
     assert.equal(input.windowMs, 300_000);
@@ -21,6 +21,7 @@ for (const scenario of ANALYSIS_SCENARIOS) {
     assert.equal(input.points.length, 60);
     assert.equal(input.points[0].timestamp, 0);
     assert.equal(input.points.at(-1).timestamp, 295_000);
+    assert.equal(input.candles.length, 5);
     assert.ok(result.reason.length > 0);
     assert.ok(result.confidence >= 0 && result.confidence <= 100);
     if (scenario !== 'LATERAL') assert.ok(result.confidence >= 68);
@@ -31,9 +32,9 @@ for (const scenario of ANALYSIS_SCENARIOS) {
 
   test(`${scenario} test inputs obey the unchanged five-minute engine gate`, () => {
     const input = createAnalysisScenario(scenario, DEFAULT_ANALYSIS_WINDOW_MS);
-    const result = analyzeChart(input.points, input.windowMs, input.now - 1);
+    const result = analyzeChart(input.points, input.windowMs, input.now - 1, input.candles);
     assert.equal(result.signal, 'AGUARDAR');
-    assert.match(result.reason, /antes de avaliar um sinal/);
+    assert.match(result.reason, /aguarda o ciclo completo/);
   });
 }
 
@@ -54,6 +55,8 @@ test('each execution has independent data and invalid scenarios fail explicitly'
   const second = createAnalysisScenario('ALTA', DEFAULT_ANALYSIS_WINDOW_MS);
   first.points[0].price = 1;
   assert.equal(second.points[0].price, 80_000);
+  first.candles[0].open = 1;
+  assert.equal(second.candles[0].open, 80_000);
   assert.throws(() => createAnalysisScenario('INVALID', DEFAULT_ANALYSIS_WINDOW_MS), /inválido/);
   assert.throws(() => createAnalysisScenario('ALTA', 0), /inválida/);
 });

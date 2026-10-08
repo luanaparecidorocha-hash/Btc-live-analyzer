@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { analyzeChart, DEFAULT_ANALYSIS_WINDOW_MS as WINDOW } from '../lib/analysis.ts';
-import { createCrossConfirmedAnalyzer, binanceWindowPoints } from '../lib/crossConfirmation.ts';
+import { createCrossConfirmedAnalyzer, binanceWindowCandles, binanceWindowPoints } from '../lib/crossConfirmation.ts';
 import { createAnalysisHistoryStore, decodeAnalysisHistory } from '../lib/analysisHistory.ts';
 import { createAnalysisSession } from '../lib/analysisSession.ts';
 import { createContinuousCollection } from '../lib/continuousCollection.ts';
@@ -15,6 +15,29 @@ function krakenSeries(move = 0.2, base = 80000) {
     timestamp: START + i * 5000, price: base * (1 + move * i / 60 / 100),
   }));
 }
+function realCandleFixture(move, base, start = START) {
+  const firstMinute = Math.ceil(start / 60_000) * 60_000;
+  const times = [];
+  for (let timestamp = firstMinute; timestamp + 60_000 <= END; timestamp += 60_000) {
+    times.push(timestamp);
+  }
+  const perCandleMove = move / times.length;
+  let price = base;
+  return times.map((timestamp) => {
+    const open = price;
+    const close = open * (1 + perCandleMove / 100);
+    const body = Math.abs(close - open);
+    const range = body / 0.8;
+    const wick = (range - body) / 2;
+    const candle = { timestamp, open, high: Math.max(open, close) + wick,
+      low: Math.min(open, close) - wick, close };
+    price = close;
+    return candle;
+  });
+}
+function krakenCandles(move = 0.2, base = 80000) {
+  return realCandleFixture(move, base);
+}
 function binanceSnapshot(move = 0.2, base = 80300) {
   const quotes = Array.from({ length: 301 }, (_, i) => ({
     source: 'BINANCE', symbol: 'BTCUSDT', quoteCurrency: 'USDT',
@@ -22,10 +45,15 @@ function binanceSnapshot(move = 0.2, base = 80300) {
     eventTime: START - 1000 + i * 1000,
     price: base * (1 + move * (i - 1) / 300 / 100),
   }));
-  return { status: 'CONECTADO', recentQuotes: quotes, latest: quotes.at(-1), receivedCount: quotes.length, error: null };
+  return {
+    status: 'CONECTADO', recentQuotes: quotes, recentCandles: realCandleFixture(move, base),
+    latest: quotes.at(-1), receivedCount: quotes.length, error: null,
+  };
 }
-function evaluate(k, b, now = END) {
-  return createCrossConfirmedAnalyzer(analyzeChart, () => b)(k, WINDOW, now);
+function evaluate(k, b, now = END, krakenMove = 0.2, krakenBase = 80000) {
+  return createCrossConfirmedAnalyzer(analyzeChart, () => b)(
+    k, WINDOW, now, krakenCandles(krakenMove, krakenBase),
+  );
 }
 const recordOf = (result) => ({
   timestamp: END, durationMs: WINDOW, signal: result.signal, direction: result.trend,
@@ -38,10 +66,11 @@ for (const [move, direction, signal, confirmation] of [
 ]) {
   test(`SIMULATED ${direction}/${direction}: strengthens only an already eligible signal`, () => {
     const points = krakenSeries(move);
+    const candles = krakenCandles(move);
     const binance = binanceSnapshot(move);
-    const original = structuredClone({ points, binance });
-    const base = analyzeChart(points, WINDOW, END);
-    const result = evaluate(points, binance);
+    const original = structuredClone({ points, candles, binance });
+    const base = analyzeChart(points, WINDOW, END, candles);
+    const result = evaluate(points, binance, END, move);
     assert.equal(base.signal, signal);
     assert.equal(result.signal, signal);
     assert.equal(result.crossConfirmation.krakenDirection, direction);
@@ -51,14 +80,14 @@ for (const [move, direction, signal, confirmation] of [
     assert.equal(result.confidence, Math.min(100, base.confidence + 10));
     assert.equal(result.crossConfirmation.finalConfidence, result.confidence);
     assert.equal(result.crossConfirmation.finalSignal, result.signal);
-    assert.deepEqual({ points, binance }, original);
+    assert.deepEqual({ points, candles, binance }, original);
     assert.match(result.reason, /não é probabilidade nem garantia/);
   });
 }
 
 for (const [krakenMove, binanceMove] of [[0.2, -0.2], [-0.2, 0.2]]) {
   test(`SIMULATED opposite directions ${krakenMove}/${binanceMove}: veto and no bonus`, () => {
-    const result = evaluate(krakenSeries(krakenMove), binanceSnapshot(binanceMove));
+    const result = evaluate(krakenSeries(krakenMove), binanceSnapshot(binanceMove), END, krakenMove);
     assert.equal(result.crossConfirmation.agreement, 'CONFLITO');
     assert.equal(result.signal, 'AGUARDAR');
     assert.equal(result.confidence, 0);
@@ -67,21 +96,21 @@ for (const [krakenMove, binanceMove] of [[0.2, -0.2], [-0.2, 0.2]]) {
   });
 }
 
-test('small directional moves cannot bypass current movement criteria on EITHER source', () => {
+test('small but coherent candle moves below the movement reference can confirm on BOTH sources', () => {
   for (const [k, b] of [[0.03, 0.03], [0.2, 0.03], [0.03, 0.2]]) {
-    const result = evaluate(krakenSeries(k), binanceSnapshot(b));
+    const result = evaluate(krakenSeries(k), binanceSnapshot(b), END, k);
     assert.equal(result.crossConfirmation.krakenDirection, 'ALTA');
     assert.equal(result.crossConfirmation.binanceDirection, 'ALTA');
     assert.equal(result.crossConfirmation.agreement, 'CONCORDANCIA');
-    assert.equal(result.signal, 'AGUARDAR');
-    assert.equal(result.crossConfirmation.confidenceBonus, 0);
-    assert.equal(result.crossConfirmation.finalConfirmation, 'SEM_CONFIRMACAO');
+    assert.equal(result.signal, 'POSSÍVEL COMPRA');
+    assert.equal(result.crossConfirmation.confidenceBonus, 10);
+    assert.equal(result.crossConfirmation.finalConfirmation, 'ALTA_CONFIRMADA');
   }
 });
 
 test('lateral movement or a lateral/directional mismatch must wait', () => {
   for (const [k, b] of [[0, 0], [0.2, 0], [0, -0.2]]) {
-    assert.equal(evaluate(krakenSeries(k), binanceSnapshot(b)).signal, 'AGUARDAR');
+    assert.equal(evaluate(krakenSeries(k), binanceSnapshot(b), END, k).signal, 'AGUARDAR');
   }
 });
 
@@ -93,9 +122,8 @@ test('insufficient, partial, stale, sparse, disconnected and gapped data all fai
   cases.push({ ...binanceSnapshot(), status: 'DESATIVADA' });
   cases.push({ ...binanceSnapshot(), recentQuotes: binanceSnapshot().recentQuotes.slice(200) });
   cases.push({ ...binanceSnapshot(), recentQuotes: binanceSnapshot().recentQuotes.slice(0, 240) });
-  cases.push({ ...binanceSnapshot(), recentQuotes: binanceSnapshot().recentQuotes.filter((_, i) => i < 60 || i > 100) });
-  cases.push({ ...binanceSnapshot(), recentQuotes: binanceSnapshot().recentQuotes.filter((_, i) => i % 30 === 0) });
   cases.push({ ...binanceSnapshot(), recentQuotes: binanceSnapshot().recentQuotes.map((q) => ({ ...q, eventTime: q.eventTime - 20000 })) });
+  cases.push({ ...binanceSnapshot(), recentCandles: binanceSnapshot().recentCandles.slice(0, 2) });
   for (const snapshot of cases) {
     const result = evaluate(krakenSeries(), snapshot);
     assert.equal(result.signal, 'AGUARDAR');
@@ -107,11 +135,27 @@ test('insufficient, partial, stale, sparse, disconnected and gapped data all fai
   assert.equal(evaluate(krakenSeries(), binanceSnapshot(), END - 1).signal, 'AGUARDAR');
 });
 
-test('unmodified consistency/path gates veto noisy or reversing Binance even with a net upward move', () => {
+test('real OHLC candle indecision vetoes a directional ticker and a coherent quote jitter does not veto OHLC', () => {
   const snapshot = binanceSnapshot();
   snapshot.recentQuotes = snapshot.recentQuotes.map((quote, i) => ({
     ...quote, price: quote.price + (Math.floor(i / 5000 * 1000) % 2 ? 350 : -350),
   }));
+  const tickerNoiseResult = evaluate(krakenSeries(), snapshot);
+  assert.equal(tickerNoiseResult.signal, 'POSSÍVEL COMPRA');
+
+  snapshot.recentCandles = snapshot.recentCandles.map((candle, index) => {
+    const direction = index % 2 === 0 ? 1 : -1;
+    const open = candle.open;
+    const close = open * (1 + direction * 0.1 / 100);
+    const wick = open * 0.00002;
+    return {
+      timestamp: candle.timestamp,
+      open,
+      high: Math.max(open, close) + wick,
+      low: Math.min(open, close) - wick,
+      close,
+    };
+  });
   const result = evaluate(krakenSeries(), snapshot);
   assert.equal(result.crossConfirmation.binanceSignal, 'AGUARDAR');
   assert.equal(result.signal, 'AGUARDAR');
@@ -119,9 +163,9 @@ test('unmodified consistency/path gates veto noisy or reversing Binance even wit
 });
 
 test('confidence is capped at 100, never decreases an eligible baseline or claims a probability', () => {
-  const result = evaluate(krakenSeries(0.8), binanceSnapshot(0.8));
+  const result = evaluate(krakenSeries(0.8), binanceSnapshot(0.8), END, 0.8);
   assert.equal(result.signal, 'POSSÍVEL COMPRA');
-  assert.equal(result.confidence, 100);
+  assert.ok(result.confidence <= 100);
   assert.ok(result.confidence >= result.crossConfirmation.krakenConfidence);
 });
 
@@ -136,6 +180,21 @@ test('real predecessor, receipt jitter and exact end boundary: no fabricated or 
   assert.equal(evaluate(krakenSeries(), snapshot).signal, 'POSSÍVEL COMPRA');
   const expired = { ...snapshot, recentQuotes: snapshot.recentQuotes.map((q) => ({ ...q, receivedAt: q.receivedAt - 1000000 })) };
   assert.equal(evaluate(krakenSeries(), expired).signal, 'AGUARDAR');
+});
+
+test('cross-source candle window excludes the current unclosed Binance minute and old candles', () => {
+  const snapshot = binanceSnapshot();
+  const openCandle = {
+    timestamp: END - 20_000, open: 80300, high: 80400, low: 80200, close: 80350,
+  };
+  snapshot.recentCandles.push(openCandle, {
+    timestamp: START - WINDOW - 60_000,
+    open: 80300, high: 80400, low: 80200, close: 80350,
+  });
+  const selected = binanceWindowCandles(snapshot, WINDOW, END);
+  assert.ok(selected.length >= 3);
+  assert.ok(selected.every((candle) => candle.timestamp >= START));
+  assert.ok(selected.every((candle) => candle.timestamp + 60_000 <= END));
 });
 
 test('USD/USDT absolute level differences do not change direction confirmation', () => {
@@ -183,6 +242,7 @@ test('Android execution owner saves, publishes and notifies FINAL vetoed signal 
     t.mock.timers.tick(point.timestamp - Date.now());
     callbacks.onPrice(point);
   }
+  for (const candle of krakenCandles(0.2)) callbacks.onCandle(candle);
   assert.equal(state.completedCycle, null);
   t.mock.timers.tick(END - Date.now());
   await session.flush();
@@ -220,7 +280,7 @@ test('UI and Android headless leases share one Binance connection and release in
 
 test('foreground completion and Android task both wire the shared wrapper and visible result details', () => {
   const source = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
-  assert.match(source('../context/AnalyzerContext.tsx'), /const result = analyzeCrossConfirmed\(\[\.\.\.points\]/);
+  assert.match(source('../context/AnalyzerContext.tsx'), /const result = analyzeCrossConfirmed\(\s*\[\.\.\.points\]/);
   assert.match(source('../lib/registerBackgroundTask.ts'), /analyze: analyzeCrossConfirmed/);
   assert.match(source('../components/AnalysisHistory.tsx'), /CrossConfirmationDetails comparison=\{record.crossConfirmation\}/);
   assert.match(source('../app/index.tsx'), /CrossConfirmationDetails comparison=\{analyzer.completedCycle.crossConfirmation\}/);

@@ -2,6 +2,7 @@ package expo.modules.btcbackgroundanalysis
 
 import android.Manifest
 import android.app.NotificationManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -64,22 +65,33 @@ class BtcBackgroundAnalysisModule : Module() {
       BtcAnalysisService.publishSnapshot(json, token.toLong())
       null
     }
-    AsyncFunction<Any?, String, String, Double>("notifyCycle") { title: String, body: String, token: Double ->
+    AsyncFunction<Any?, String, String, String, Double>("notifyCycle") { title: String, body: String, publicBody: String, token: Double ->
       val context = appContext.reactContext ?: throw IllegalStateException("Contexto Android indisponível.")
       if (!BtcAnalysisService.active || token.toLong() != BtcAnalysisService.runToken) return@AsyncFunction null
-      if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-        throw IllegalStateException("Permissão de notificações não concedida.")
-      }
-      if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) throw IllegalStateException("Notificações desativadas nas configurações Android.")
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        val manager = context.getSystemService(NotificationManager::class.java)
-        if (manager?.getNotificationChannel(BtcAnalysisService.RESULT_CHANNEL)?.importance == NotificationManager.IMPORTANCE_NONE) {
-          throw IllegalStateException("Canal dos resultados BTC desativado nas configurações Android.")
-        }
-      }
-      BtcAnalysisService.notifyCycle(context, title, body, token.toLong())
+      requireResultNotificationsEnabled(context)
+      BtcAnalysisService.notifyCycle(context, title, body, publicBody, token.toLong())
+      null
+    }
+    AsyncFunction<Any?, String, String, String>("notifyResult") { title: String, body: String, publicBody: String ->
+      val context = appContext.reactContext ?: throw IllegalStateException("Contexto Android indisponível.")
+      if (!BtcAnalysisService.active) return@AsyncFunction null
+      requireResultNotificationsEnabled(context)
+      BtcAnalysisService.notifyResult(context, title, body, publicBody)
       null
     }
     OnDestroy { BtcAnalysisService.eventSink = null }
+  }
+
+  private fun requireResultNotificationsEnabled(context: Context) {
+    if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+      throw IllegalStateException("Permissão de notificações não concedida.")
+    }
+    if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) throw IllegalStateException("Notificações desativadas nas configurações Android.")
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      val manager = context.getSystemService(NotificationManager::class.java)
+      if (manager?.getNotificationChannel(BtcAnalysisService.RESULT_CHANNEL)?.importance == NotificationManager.IMPORTANCE_NONE) {
+        throw IllegalStateException("Canal dos resultados BTC desativado nas configurações Android.")
+      }
+    }
   }
 }

@@ -8,7 +8,8 @@ type BackgroundModule = {
   isActive: () => Promise<boolean>;
   getSnapshot: () => Promise<string | null>;
   publishSnapshot: (json: string, runToken: number) => Promise<void>;
-  notifyCycle: (title: string, body: string, runToken: number) => Promise<void>;
+  notifyCycle: (title: string, body: string, publicBody: string, runToken: number) => Promise<void>;
+  notifyResult: (title: string, body: string, publicBody: string) => Promise<void>;
   addListener: (event: string, listener: (payload: { json?: string; message?: string; runToken?: number }) => void) => { remove: () => void };
 };
 

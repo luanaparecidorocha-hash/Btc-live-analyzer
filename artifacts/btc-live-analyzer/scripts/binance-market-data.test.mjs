@@ -1,9 +1,28 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createBinanceMarketFeed, parseBinanceMiniTicker, BINANCE_BTC_USDT_URL } from '../lib/binanceMarketData.ts';
+import {
+  createBinanceMarketFeed,
+  parseBinanceMiniTicker,
+  parseBinanceOneMinuteKline,
+  BINANCE_BTC_USDT_URL,
+} from '../lib/binanceMarketData.ts';
 
 const ticker = (overrides = {}) => JSON.stringify({
   e: '24hrMiniTicker', E: 1700000000000, s: 'BTCUSDT', c: '65000.12', ...overrides,
+});
+const combinedTicker = (overrides = {}) => JSON.stringify({
+  stream: 'btcusdt@miniTicker',
+  data: JSON.parse(ticker(overrides)),
+});
+const kline = ({ closed = true, interval = '1m', symbol = 'BTCUSDT', overrides = {} } = {}) => JSON.stringify({
+  stream: 'btcusdt@kline_1m',
+  data: {
+    e: 'kline', E: 1700000000000, s: symbol,
+    k: {
+      t: 1700000040000, i: interval, o: '65000', h: '65100',
+      l: '64900', c: '65050', x: closed, ...overrides,
+    },
+  },
 });
 
 test('parses only genuine BTCUSDT last-price observations with separate timestamps', () => {
@@ -17,6 +36,19 @@ test('parses only genuine BTCUSDT last-price observations with separate timestam
     ticker({ E: null }), ticker({ E: -1 }), ticker({ E: 1.5 })]) {
     assert.equal(parseBinanceMiniTicker(raw), null, raw);
   }
+});
+
+test('parses genuine one-minute Binance OHLC and accepts only closed BTCUSDT candles', () => {
+  assert.deepEqual(parseBinanceOneMinuteKline(kline()), {
+    timestamp: 1700000040000, open: 65000, high: 65100, low: 64900, close: 65050,
+  });
+  assert.equal(parseBinanceOneMinuteKline(kline({ closed: false })), null);
+  assert.equal(parseBinanceOneMinuteKline(kline({ interval: '5m' })), null);
+  assert.equal(parseBinanceOneMinuteKline(kline({ symbol: 'ETHUSDT' })), null);
+  for (const overrides of [
+    { o: 'NaN' }, { h: '65010' }, { l: '65100' }, { t: -1 },
+  ]) assert.equal(parseBinanceOneMinuteKline(kline({ overrides })), null);
+  assert.equal(parseBinanceMiniTicker(combinedTicker(), 1700000000500).price, 65000.12);
 });
 
 test('isolated lifecycle, real-data readiness, bounded storage, retries and cleanup', (t) => {
@@ -42,10 +74,17 @@ test('isolated lifecycle, real-data readiness, bounded storage, retries and clea
   sockets[0].emit(ticker({ s: 'ETHUSDT' }));
   assert.equal(feed.getSnapshot().latest, null);
   for (let i = 0; i < 670; i++) sockets[0].emit(ticker({ E: 1700000000000 + i }));
+  sockets[0].emit(kline({ closed: false }));
+  assert.equal(feed.getSnapshot().recentCandles.length, 0, 'open kline must not enter analysis');
+  sockets[0].emit(kline());
   const filled = feed.getSnapshot();
   assert.equal(filled.status, 'CONECTADO');
   assert.equal(filled.receivedCount, 670);
   assert.equal(filled.recentQuotes.length, 660);
+  assert.deepEqual(filled.recentCandles, [{
+    timestamp: 1700000040000, open: 65000, high: 65100, low: 64900, close: 65050,
+  }]);
+  assert.match(sockets[0].url, /btcusdt@miniTicker\/btcusdt@kline_1m/);
   assert.ok(Object.isFrozen(filled.recentQuotes));
   sockets[0].emit(ticker()); // Old event.
   assert.equal(feed.getSnapshot(), filled);

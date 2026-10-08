@@ -1,7 +1,6 @@
 import { Feather } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import React, { useState } from 'react';
-import Svg, { Circle, Line, Polyline } from 'react-native-svg';
+import React, { useMemo, useState } from 'react';
 import {
   Modal,
   Platform,
@@ -14,12 +13,14 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors } from '@/hooks/useColors';
 import { AnalyzerProvider, useAnalyzer } from '@/context/AnalyzerContext';
+import { CandlestickChart, type ChartSource } from '@/components/CandlestickChart';
 import { CrossConfirmationDetails } from '@/components/CrossConfirmationDetails';
-import { DEFAULT_ANALYSIS_WINDOW_MS } from '@/lib/analysis';
-import type { ChartPoint } from '@/lib/analysis';
+import { analyzeChart, DEFAULT_ANALYSIS_WINDOW_MS, selectClosedCandlesInWindow } from '@/lib/analysis';
 import type { CaptureRegion } from '@/lib/screenCapture';
+import { binanceWindowCandles, binanceWindowPoints } from '@/lib/crossConfirmation';
 import { AnalysisHistory } from '@/components/AnalysisHistory';
 import { AnalysisTestPanel } from '@/components/AnalysisTestPanel';
+import { SignalLearningDetails } from '@/components/SignalLearningDetails';
 
 const signalColor = {
   'POSSÍVEL COMPRA': '#55d6a6',
@@ -56,78 +57,57 @@ function SignalBadge({ signal }: { signal: 'POSSÍVEL COMPRA' | 'POSSÍVEL VENDA
   );
 }
 
-function ChartPreview({ points, currentPrice }: { points: ChartPoint[]; currentPrice: number | null }) {
-  const colors = useColors();
-  const visiblePoints = points.slice(-60);
-  const prices = visiblePoints.map((point) => point.price);
-  const minimum = prices.length > 0 ? Math.min(...prices) : 0;
-  const maximum = prices.length > 0 ? Math.max(...prices) : 0;
-  const rawRange = maximum - minimum;
-  const displayRange = rawRange > 0 ? rawRange * 1.2 : Math.max(maximum * 0.001, 1);
-  const displayMinimum = rawRange > 0 ? minimum - rawRange * 0.1 : minimum - displayRange / 2;
-  const linePoints = visiblePoints.map((point, index) => {
-    const x = 8 + (index / Math.max(visiblePoints.length - 1, 1)) * 304;
-    const y = 6 + ((displayMinimum + displayRange - point.price) / displayRange) * 80;
-    return `${x.toFixed(2)},${y.toFixed(2)}`;
-  }).join(' ');
-  const trendColor = visiblePoints.length < 2
-    ? colors.primary
-    : visiblePoints[visiblePoints.length - 1].price >= visiblePoints[0].price
-      ? '#55d6a6'
-      : '#ee6f5c';
-
-  const formatPrice = (price: number | null) => price === null
-    ? '—'
-    : new Intl.NumberFormat('en-US', {
-        style: 'currency',
-        currency: 'USD',
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      }).format(price);
-
-  return (
-    <View style={[styles.chartPreview, { backgroundColor: colors.card, borderColor: colors.border }]}>
-      <View style={styles.chartLabelRow}>
-        <Text style={[styles.chartLabel, { color: colors.mutedForeground }]}>BTC/USD · KRAKEN</Text>
-        <Text style={[styles.chartPrice, { color: colors.foreground }]}>{formatPrice(currentPrice)}</Text>
-      </View>
-      <View style={styles.chartLines}>
-        <Svg width="100%" height="100%" viewBox="0 0 320 92" preserveAspectRatio="none">
-          {[16, 46, 76].map((y) => (
-            <Line key={y} x1="0" x2="320" y1={y} y2={y} stroke={colors.border} strokeWidth="1" />
-          ))}
-          {visiblePoints.length > 1 ? (
-            <Polyline
-              points={linePoints}
-              fill="none"
-              stroke={trendColor}
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          ) : null}
-          {visiblePoints.length === 1 ? (
-            <Circle cx="160" cy="46" r="3.5" fill={trendColor} />
-          ) : null}
-        </Svg>
-        {visiblePoints.length < 2 ? (
-          <View style={styles.chartEmptyState}>
-            <Text style={[styles.chartEmptyText, { color: colors.mutedForeground }]}>
-              {visiblePoints.length === 1 ? 'Aguardando mais cotações reais…' : 'Inicie para receber preços ao vivo'}
-            </Text>
-          </View>
-        ) : null}
-      </View>
-    </View>
-  );
-}
-
 function AnalyzerScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const analyzer = useAnalyzer();
+  const [chartSource, setChartSource] = useState<ChartSource>('KRAKEN');
   const [showRegion, setShowRegion] = useState<boolean>(false);
   const [draftRegion, setDraftRegion] = useState<CaptureRegion>(analyzer.region);
+  const chartSourceCandles = chartSource === 'KRAKEN'
+    ? analyzer.krakenCandles
+    : analyzer.binanceSnapshot.recentCandles;
+  const chartSourceTime = chartSource === 'KRAKEN'
+    ? analyzer.lastPriceAt ?? 0
+    : analyzer.binanceSnapshot.latest?.receivedAt ?? 0;
+  const newestSourceCandle = chartSourceCandles[chartSourceCandles.length - 1];
+  const chartNow = analyzer.isRunning
+    ? analyzer.analysisNow
+    : Math.max(
+        chartSourceTime,
+        newestSourceCandle ? newestSourceCandle.timestamp + 60_000 : 0,
+      );
+  const chartInputCandles = useMemo(
+    () => chartSource === 'KRAKEN'
+      ? analyzer.krakenCandles
+      : binanceWindowCandles(analyzer.binanceSnapshot, DEFAULT_ANALYSIS_WINDOW_MS, chartNow),
+    [analyzer.binanceSnapshot, analyzer.krakenCandles, chartNow, chartSource],
+  );
+  const chartCandles = useMemo(
+    () => selectClosedCandlesInWindow(
+      chartInputCandles,
+      chartNow - DEFAULT_ANALYSIS_WINDOW_MS,
+      chartNow,
+    ),
+    [chartInputCandles, chartNow],
+  );
+  const chartAnalysis = useMemo(
+    () => chartSource === 'KRAKEN'
+      ? analyzer.analysis
+      : analyzeChart(
+          binanceWindowPoints(analyzer.binanceSnapshot, DEFAULT_ANALYSIS_WINDOW_MS, analyzer.analysisNow),
+          DEFAULT_ANALYSIS_WINDOW_MS,
+          analyzer.analysisNow,
+          chartInputCandles,
+        ),
+    [analyzer.analysis, analyzer.analysisNow, analyzer.binanceSnapshot, chartInputCandles, chartSource],
+  );
+  const chartPrice = chartSource === 'KRAKEN'
+    ? analyzer.currentPrice ?? chartCandles[chartCandles.length - 1]?.close ?? null
+    : analyzer.binanceSnapshot.latest?.price ?? chartCandles[chartCandles.length - 1]?.close ?? null;
+  const chartFeedStatus = chartSource === 'KRAKEN'
+    ? analyzer.marketStatus
+    : analyzer.binanceSnapshot.status;
 
   const handleStart = async () => {
     await Haptics.selectionAsync();
@@ -249,7 +229,14 @@ function AnalyzerScreen() {
           </View>
         </View>
 
-        <ChartPreview points={analyzer.history} currentPrice={analyzer.currentPrice} />
+        <CandlestickChart
+          source={chartSource}
+          onSourceChange={setChartSource}
+          candles={chartCandles}
+          currentPrice={chartPrice}
+          analysis={chartAnalysis}
+          feedStatus={chartFeedStatus}
+        />
 
         <View style={styles.actionRow}>
           <Pressable
@@ -288,6 +275,8 @@ function AnalyzerScreen() {
         </Pressable>
 
         <AnalysisHistory records={analyzer.signalHistory} onClear={analyzer.clearAnalysisHistory} />
+
+        <SignalLearningDetails learning={analyzer.learning} />
 
         <AnalysisTestPanel />
 
@@ -375,13 +364,6 @@ const styles = StyleSheet.create({
   metric: { gap: 5 },
   metricLabel: { fontSize: 9, fontFamily: 'Inter_700Bold', letterSpacing: 0.6 },
   metricValue: { fontSize: 13, fontFamily: 'Inter_600SemiBold' },
-  chartPreview: { height: 164, borderRadius: 20, borderWidth: 1, overflow: 'hidden', padding: 14, gap: 8 },
-  chartLabelRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  chartLabel: { fontSize: 9, fontFamily: 'Inter_700Bold', letterSpacing: 1 },
-  chartPrice: { fontSize: 13, fontFamily: 'Inter_600SemiBold' },
-  chartLines: { flex: 1, position: 'relative', overflow: 'hidden' },
-  chartEmptyState: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
-  chartEmptyText: { fontSize: 11, fontFamily: 'Inter_500Medium' },
   actionRow: { flexDirection: 'row', gap: 10 },
   primaryButton: { flex: 1, minHeight: 52, borderRadius: 16, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 },
   primaryButtonText: { fontSize: 12, fontFamily: 'Inter_700Bold', letterSpacing: 0.7 },

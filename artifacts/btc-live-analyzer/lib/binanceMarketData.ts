@@ -1,5 +1,8 @@
+import type { OhlcCandle } from './analysis';
+
 // Independent observation feed. Keep USDT prices separate from the Kraken USD series.
-export const BINANCE_BTC_USDT_URL = 'wss://data-stream.binance.vision/ws/btcusdt@miniTicker';
+export const BINANCE_BTC_USDT_URL =
+  'wss://data-stream.binance.vision/stream?streams=btcusdt@miniTicker/btcusdt@kline_1m';
 
 export type BinanceQuote = Readonly<{
   source: 'BINANCE';
@@ -14,6 +17,7 @@ export type BinanceFeedSnapshot = Readonly<{
   status: 'DESATIVADA' | 'CONECTANDO' | 'CONECTADO' | 'RECONECTANDO';
   latest: BinanceQuote | null;
   recentQuotes: readonly BinanceQuote[];
+  recentCandles: readonly OhlcCandle[];
   receivedCount: number;
   error: string | null;
 }>;
@@ -22,12 +26,22 @@ const RETRY_DELAYS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
 const NO_DATA_TIMEOUT_MS = 45_000;
 // Two windows retain real start-boundary coverage despite 1s ticker/receipt jitter.
 const HISTORY_LIMIT = 660;
+const CANDLE_HISTORY_LIMIT = 60;
 
-export function parseBinanceMiniTicker(payload: string, receivedAt = Date.now()): BinanceQuote | null {
+function unwrapBinancePayload(payload: string): Record<string, unknown> | null {
   let data: unknown;
   try { data = JSON.parse(payload); } catch { return null; }
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
-  const message = data as Record<string, unknown>;
+  const envelope = data as Record<string, unknown>;
+  const message = envelope.data;
+  return message && typeof message === 'object' && !Array.isArray(message)
+    ? message as Record<string, unknown>
+    : envelope;
+}
+
+export function parseBinanceMiniTicker(payload: string, receivedAt = Date.now()): BinanceQuote | null {
+  const message = unwrapBinancePayload(payload);
+  if (!message) return null;
   if (message.e !== '24hrMiniTicker' || message.s !== 'BTCUSDT') return null;
   if (typeof message.c !== 'string' || !message.c.trim()) return null;
   const price = Number(message.c);
@@ -40,6 +54,27 @@ export function parseBinanceMiniTicker(payload: string, receivedAt = Date.now())
   });
 }
 
+export function parseBinanceOneMinuteKline(payload: string): OhlcCandle | null {
+  const message = unwrapBinancePayload(payload);
+  if (!message || message.e !== 'kline' || message.s !== 'BTCUSDT'
+    || !message.k || typeof message.k !== 'object' || Array.isArray(message.k)) return null;
+  const kline = message.k as Record<string, unknown>;
+  if (kline.i !== '1m' || kline.x !== true) return null;
+
+  const timestamp = kline.t;
+  const open = Number(kline.o);
+  const high = Number(kline.h);
+  const low = Number(kline.l);
+  const close = Number(kline.c);
+  if (typeof timestamp !== 'number' || !Number.isSafeInteger(timestamp) || timestamp <= 0
+    || ![open, high, low, close].every((value) => Number.isFinite(value) && value > 0)
+    || high < Math.max(open, close)
+    || low > Math.min(open, close)
+    || high < low) return null;
+
+  return Object.freeze({ timestamp, open, high, low, close });
+}
+
 /**
  * In-memory only: last quote, explicit connection/error state, and up to 660 recent
  * updates for future comparisons. miniTicker publishes the last price every ~1s;
@@ -48,6 +83,7 @@ export function parseBinanceMiniTicker(payload: string, receivedAt = Date.now())
 export function createBinanceMarketFeed() {
   let snapshot: BinanceFeedSnapshot = Object.freeze({
     status: 'DESATIVADA', latest: null, recentQuotes: Object.freeze([]),
+    recentCandles: Object.freeze([]),
     receivedCount: 0, error: null,
   });
   let running = false;
@@ -98,7 +134,17 @@ export function createBinanceMarketFeed() {
       armWatchdog();
       active.onmessage = (event) => {
         if (!running || socket !== active) return;
-        const quote = parseBinanceMiniTicker(String(event.data));
+        const raw = String(event.data);
+        const candle = parseBinanceOneMinuteKline(raw);
+        if (candle) {
+          const recentCandles = [
+            ...snapshot.recentCandles.filter((item) => item.timestamp !== candle.timestamp),
+            candle,
+          ].sort((left, right) => left.timestamp - right.timestamp).slice(-CANDLE_HISTORY_LIMIT);
+          publish({ recentCandles: Object.freeze(recentCandles) });
+          return;
+        }
+        const quote = parseBinanceMiniTicker(raw);
         if (!quote) return;
         // Do not let delayed/duplicate exchange events replace newer observations.
         if (snapshot.latest && quote.eventTime <= snapshot.latest.eventTime) return;

@@ -1,7 +1,11 @@
+import type { OhlcCandle } from './analysis';
+
 export type MarketPricePoint = {
   timestamp: number;
   price: number;
 };
+
+export type MarketOhlcCandle = OhlcCandle;
 
 export type MarketFeedStatus =
   | 'DESATIVADA'
@@ -21,8 +25,22 @@ type KrakenTickerMessage = {
   message?: string;
 };
 
+type KrakenOhlcMessage = {
+  channel?: string;
+  data?: Array<{
+    symbol?: string;
+    interval?: number;
+    interval_begin?: string;
+    open?: number | string;
+    high?: number | string;
+    low?: number | string;
+    close?: number | string;
+  }>;
+};
+
 type MarketFeedCallbacks = {
   onPrice: (point: MarketPricePoint) => void;
+  onCandle?: (candle: MarketOhlcCandle) => void;
   onStatus: (status: MarketFeedStatus) => void;
   onError: (message: string) => void;
 };
@@ -57,6 +75,32 @@ export function parseKrakenTickerMessage(
     timestamp: receivedAt,
     price,
   };
+}
+
+export function parseKrakenOhlcMessage(payload: string): MarketOhlcCandle | null {
+  let message: KrakenOhlcMessage;
+  try {
+    message = JSON.parse(payload) as KrakenOhlcMessage;
+  } catch {
+    return null;
+  }
+
+  if (message.channel !== 'ohlc' || !Array.isArray(message.data)) return null;
+  const candle = message.data.find((item) => item.symbol === 'BTC/USD' && item.interval === 1);
+  if (!candle || typeof candle.interval_begin !== 'string') return null;
+
+  const timestamp = Date.parse(candle.interval_begin);
+  const open = Number(candle.open);
+  const high = Number(candle.high);
+  const low = Number(candle.low);
+  const close = Number(candle.close);
+  if (!Number.isSafeInteger(timestamp) || timestamp <= 0
+    || ![open, high, low, close].every((value) => Number.isFinite(value) && value > 0)
+    || high < Math.max(open, close)
+    || low > Math.min(open, close)
+    || high < low) return null;
+
+  return Object.freeze({ timestamp, open, high, low, close });
 }
 
 export function connectBtcUsdTicker(callbacks: MarketFeedCallbacks): MarketFeedConnection {
@@ -95,6 +139,15 @@ export function connectBtcUsdTicker(callbacks: MarketFeedCallbacks): MarketFeedC
             snapshot: true,
           },
         }));
+        nextSocket.send(JSON.stringify({
+          method: 'subscribe',
+          params: {
+            channel: 'ohlc',
+            symbol: ['BTC/USD'],
+            interval: 1,
+            snapshot: true,
+          },
+        }));
       };
 
       nextSocket.onmessage = (event) => {
@@ -109,6 +162,12 @@ export function connectBtcUsdTicker(callbacks: MarketFeedCallbacks): MarketFeedC
 
         if (message.success === false || message.error) {
           callbacks.onError(message.error ?? message.message ?? 'A fonte BTC/USD recusou a inscrição.');
+          return;
+        }
+
+        const candle = parseKrakenOhlcMessage(rawMessage);
+        if (candle) {
+          callbacks.onCandle?.(candle);
           return;
         }
 
